@@ -44,6 +44,43 @@ app.post('/downloads/:modId', (req, res) => {
     res.json({ success: true, total: modDownloads[modId] });
 });
 
+let githubCache = { data: null, lastFetch: 0 };
+const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+
+// Get GitHub Releases Proxy
+app.get('/github-releases', async (req, res) => {
+    const now = Date.now();
+    if (githubCache.data && (now - githubCache.lastFetch < CACHE_DURATION)) {
+        console.log('Serving GitHub releases from cache');
+        return res.json(githubCache.data);
+    }
+
+    try {
+        console.log('Fetching GitHub releases from API...');
+        // Optional: you can add authorization headers if you set a GITHUB_TOKEN in your .env
+        const headers = { 'User-Agent': 'HoNModLauncher-Counter-Server' };
+        if (process.env.GITHUB_TOKEN) {
+            headers['Authorization'] = `token ${process.env.GITHUB_TOKEN}`;
+        }
+
+        const response = await fetch('https://api.github.com/repos/KRAT0Sz/hon-mod/releases', { headers });
+        if (!response.ok) throw new Error(`GitHub API returned ${response.status}`);
+        
+        const data = await response.json();
+        githubCache.data = data;
+        githubCache.lastFetch = now;
+        
+        res.json(data);
+    } catch (error) {
+        console.error('GitHub Fetch Error:', error.message);
+        // Fallback to cache even if expired
+        if (githubCache.data) {
+            return res.json(githubCache.data);
+        }
+        res.status(500).json({ error: 'Failed to fetch from GitHub' });
+    }
+});
+
 const server = http.createServer(app);
 
 const io = new Server(server, {
