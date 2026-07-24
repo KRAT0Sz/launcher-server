@@ -91,6 +91,9 @@ const io = new Server(server, {
 });
 
 let onlineCount = 0;
+const chatHistory = []; // Keep last 50 messages in memory
+const MAX_CHAT_HISTORY = 50;
+const rateLimitMap = new Map(); // socket.id -> last message timestamp
 
 io.on('connection', (socket) => {
     onlineCount++;
@@ -99,9 +102,46 @@ io.on('connection', (socket) => {
     // Broadcast the updated count to everyone
     io.emit('onlineCount', onlineCount);
 
+    // Send chat history to newly connected client
+    socket.emit('chat-history', chatHistory);
+
+    // Handle setting nickname
+    socket.on('set-nickname', (nickname) => {
+        if (typeof nickname === 'string' && nickname.trim().length > 0 && nickname.trim().length <= 20) {
+            socket.nickname = nickname.trim();
+        }
+    });
+
+    // Handle chat messages
+    socket.on('chat-message', (msg) => {
+        if (typeof msg !== 'string' || msg.trim().length === 0 || msg.trim().length > 200) return;
+
+        // Rate limit: 1 message per second per user
+        const now = Date.now();
+        const lastMsg = rateLimitMap.get(socket.id) || 0;
+        if (now - lastMsg < 1000) return;
+        rateLimitMap.set(socket.id, now);
+
+        const chatMsg = {
+            nickname: socket.nickname || 'Anonymous',
+            message: msg.trim(),
+            timestamp: now,
+            id: socket.id
+        };
+
+        chatHistory.push(chatMsg);
+        if (chatHistory.length > MAX_CHAT_HISTORY) {
+            chatHistory.shift();
+        }
+
+        // Broadcast to everyone
+        io.emit('chat-message', chatMsg);
+    });
+
     socket.on('disconnect', () => {
         onlineCount = Math.max(0, onlineCount - 1);
         console.log(`User disconnected. Online: ${onlineCount}`);
+        rateLimitMap.delete(socket.id);
         
         // Broadcast the updated count
         io.emit('onlineCount', onlineCount);
