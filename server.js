@@ -11,6 +11,14 @@ app.use(cors());
 // Parse JSON bodies (as sent by API clients)
 app.use(express.json());
 
+// ============ VIP / Reserved Names Config ============
+// Format: "Nickname1:password1,Nickname2:password2"
+const VIP_CONFIG = (process.env.VIP_PASSWORDS || 'Dev:dev123').split(',').map(entry => {
+    const [name, password] = entry.split(':');
+    return { name: name.trim().toLowerCase(), password: (password || '').trim() };
+});
+const VIP_NAMES = new Set(VIP_CONFIG.map(v => v.name));
+
 const downloadsFile = path.join(__dirname, 'downloads.json');
 let modDownloads = {};
 
@@ -94,11 +102,31 @@ let onlineCount = 0;
 const chatHistory = []; // Keep last 50 messages in memory
 const MAX_CHAT_HISTORY = 50;
 const rateLimitMap = new Map(); // socket.id -> last message timestamp
+const takenNicknames = new Map(); // lowercase nickname -> { originalName, socketId }
+
+function isNicknameTaken(name) {
+    if (!name) return null;
+    return takenNicknames.has(name.toLowerCase());
+}
+
+function registerNickname(name, socketId) {
+    takenNicknames.set(name.toLowerCase(), { originalName: name, socketId });
+}
+
+function releaseNickname(socketId) {
+    for (const [key, info] of takenNicknames.entries()) {
+        if (info.socketId === socketId) {
+            takenNicknames.delete(key);
+            return info.originalName;
+        }
+    }
+    return null;
+}
 
 io.on('connection', (socket) => {
     onlineCount++;
     console.log(`User connected. Online: ${onlineCount}`);
-    
+
     // Broadcast the updated count to everyone
     io.emit('onlineCount', onlineCount);
 
@@ -107,9 +135,66 @@ io.on('connection', (socket) => {
 
     // Handle setting nickname
     socket.on('set-nickname', (nickname) => {
-        if (typeof nickname === 'string' && nickname.trim().length > 0 && nickname.trim().length <= 20) {
-            socket.nickname = nickname.trim();
+        if (typeof nickname !== 'string') return;
+        const trimmed = nickname.trim();
+        if (trimmed.length === 0 || trimmed.length > 20) {
+            socket.emit('nickname-rejected', { reason: 'INVALID_LENGTH' });
+            return;
         }
+
+        // Release previous nickname for this socket (if any)
+        const oldLower = socket.nickname ? socket.nickname.toLowerCase() : null;
+        if (oldLower && takenNicknames.get(oldLower)?.socketId === socket.id) {
+            takenNicknames.delete(oldLower);
+        }
+
+        // VIP names are reserved — require explicit VIP auth first
+        // (case-insensitive check against the reserved list)
+        const requestedLower = trimmed.toLowerCase();
+        const isVipRequested = VIP_NAMES.has(requestedLower);
+        const isAuthenticatedVip = socket.vipName && socket.vipName.toLowerCase() === requestedLower;
+
+        if (isVipRequested && !isAuthenticatedVip) {
+            socket.emit('nickname-rejected', { reason: 'VIP_REQUIRED', requested: trimmed });
+            return;
+        }
+
+        // Check duplicate (case-insensitive) — exclude self
+        const existing = takenNicknames.get(requestedLower);
+        if (existing && existing.socketId !== socket.id) {
+            socket.emit('nickname-rejected', { reason: 'TAKEN', requested: trimmed });
+            return;
+        }
+
+        socket.nickname = trimmed;
+        socket.vipName = isAuthenticatedVip ? requestedLower : null;
+        socket.isVip = !!socket.vipName;
+        registerNickname(trimmed, socket.id);
+        socket.emit('nickname-accepted', { nickname: trimmed, isVip: socket.isVip });
+        console.log(`Socket ${socket.id} set nickname: ${trimmed}${socket.isVip ? ' [VIP]' : ''}`);
+    });
+
+    // VIP authentication: verify password and grant permission to use reserved name
+    socket.on('vip-auth', (payload) => {
+        if (!payload || typeof payload !== 'object') return;
+        const { name, password } = payload;
+        if (typeof name !== 'string' || typeof password !== 'string') return;
+
+        const nameLower = name.trim().toLowerCase();
+        const vip = VIP_CONFIG.find(v => v.name === nameLower);
+        if (!vip) {
+            socket.emit('vip-auth-result', { success: false, reason: 'UNKNOWN_VIP' });
+            return;
+        }
+        if (vip.password !== password) {
+            socket.emit('vip-auth-result', { success: false, reason: 'BAD_PASSWORD', name: vip.name });
+            console.log(`[VIP] Failed auth for ${vip.name} from socket ${socket.id}`);
+            return;
+        }
+        socket.vipName = vip.name;
+        socket.isVip = true;
+        socket.emit('vip-auth-result', { success: true, name: vip.name });
+        console.log(`[VIP] Granted ${vip.name} to socket ${socket.id}`);
     });
 
     // Handle chat messages
@@ -126,7 +211,8 @@ io.on('connection', (socket) => {
             nickname: socket.nickname || 'Anonymous',
             message: msg.trim(),
             timestamp: now,
-            id: socket.id
+            id: socket.id,
+            isVip: !!socket.isVip
         };
 
         chatHistory.push(chatMsg);
@@ -142,7 +228,11 @@ io.on('connection', (socket) => {
         onlineCount = Math.max(0, onlineCount - 1);
         console.log(`User disconnected. Online: ${onlineCount}`);
         rateLimitMap.delete(socket.id);
-        
+        const releasedName = releaseNickname(socket.id);
+        if (releasedName) {
+            console.log(`Released nickname: ${releasedName}`);
+        }
+
         // Broadcast the updated count
         io.emit('onlineCount', onlineCount);
     });
