@@ -14,8 +14,7 @@ app.use(express.json());
 // ============ VIP / Reserved Names Config ============
 // Format: "Nickname1:password1,Nickname2:password2"
 const VIP_CONFIG = (process.env.VIP_PASSWORDS || 'Dev:dev123')
-    .split(/[,;
-]/)
+    .split(/[,;\n]/)
     .map(entry => entry.trim())
     .filter(Boolean)
     .map(entry => {
