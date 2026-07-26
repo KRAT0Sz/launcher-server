@@ -13,10 +13,20 @@ app.use(express.json());
 
 // ============ VIP / Reserved Names Config ============
 // Format: "Nickname1:password1,Nickname2:password2"
-const VIP_CONFIG = (process.env.VIP_PASSWORDS || 'Dev:dev123').split(',').map(entry => {
-    const [name, password] = entry.split(':');
-    return { name: name.trim().toLowerCase(), password: (password || '').trim() };
-});
+const VIP_CONFIG = (process.env.VIP_PASSWORDS || 'Dev:dev123')
+    .split(/[,;
+]/)
+    .map(entry => entry.trim())
+    .filter(Boolean)
+    .map(entry => {
+        const match = entry.match(/^([^:=!@]+)[:=!@](.+)$/);
+        if (!match) return null;
+        return {
+            name: match[1].trim().toLowerCase(),
+            password: match[2].trim()
+        };
+    })
+    .filter(Boolean);
 const VIP_NAMES = new Set(VIP_CONFIG.map(v => v.name));
 
 const downloadsFile = path.join(__dirname, 'downloads.json');
