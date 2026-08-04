@@ -1,19 +1,39 @@
 {
-  "name": "backend",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "name": "honforge-server",
+  "version": "2.0.0",
+  "description": "HoNForge backend — chat server, mod download counter, GitHub releases proxy (PostgreSQL + Docker)",
+  "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "node --watch server.js",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f",
+    "docker:rebuild": "docker compose up -d --build",
+    "db:init": "node scripts/init-db.js"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "hon",
+    "newerth",
+    "mod-launcher",
+    "chat",
+    "postgresql"
+  ],
+  "author": "KRAT0Sz",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "cors": "^2.8.6",
-    "express": "^5.2.1",
-    "socket.io": "^4.8.3"
+    "axios": "^1.19.0",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "express": "^4.21.1",
+    "express-rate-limit": "^7.4.1",
+    "helmet": "^8.0.0",
+    "jsonwebtoken": "^9.0.3",
+    "pg": "^8.13.1",
+    "socket.io": "^4.8.1"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }
