@@ -417,10 +417,24 @@ app.post('/api/points/claim/:type', authenticateToken, async (req, res) => {
     
     if (amount === 0) return res.status(400).json({ error: 'Invalid claim type' });
 
-    // Check if already claimed today
     try {
         const startOfDay = new Date();
         startOfDay.setHours(0, 0, 0, 0);
+        
+        if (type === 'daily-reward') {
+            const { rows: todayClaims } = await query(
+                "SELECT reason FROM point_logs WHERE discord_id = $1 AND reason LIKE 'Claimed: %' AND created_at >= $2",
+                [discord_id, startOfDay.getTime()]
+            );
+            const hasLogin = todayClaims.some(c => c.reason === 'Claimed: login-reward');
+            const hasPlay = todayClaims.some(c => c.reason === 'Claimed: play-reward');
+            const onlineCount = todayClaims.filter(c => c.reason === 'Claimed: online-reward').length;
+            
+            if (!hasLogin || !hasPlay || onlineCount < 6) {
+                return res.status(400).json({ error: 'You must claim Login, Play, and all 6 Online rewards first!' });
+            }
+        }
+
         const { rows } = await query(
             'SELECT created_at FROM point_logs WHERE discord_id = $1 AND reason = $2 AND created_at >= $3 ORDER BY created_at DESC',
             [discord_id, `Claimed: ${type}`, startOfDay.getTime()]
