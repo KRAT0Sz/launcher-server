@@ -395,9 +395,15 @@ app.get('/api/mods/unlocked', authenticateToken, async (req, res) => {
 
 // Daily Claim APIs
 app.post('/api/points/claim/:type', authenticateToken, async (req, res) => {
-    const type = req.params.type; // 'daily-login' or 'daily-play'
+    const type = req.params.type; 
     const discord_id = req.user.discord_id;
-    const amount = type === 'daily-login' ? 10 : type === 'daily-play' ? 20 : 0;
+    const amountMap = {
+        'login-reward': 10,
+        'daily-reward': 20,
+        'play-reward': 10,
+        'online-reward': 5
+    };
+    const amount = amountMap[type] || 0;
     
     if (amount === 0) return res.status(400).json({ error: 'Invalid claim type' });
 
@@ -406,12 +412,21 @@ app.post('/api/points/claim/:type', authenticateToken, async (req, res) => {
         const startOfDay = new Date();
         startOfDay.setHours(0, 0, 0, 0);
         const { rows } = await query(
-            'SELECT 1 FROM point_logs WHERE discord_id = $1 AND reason = $2 AND created_at >= $3',
+            'SELECT created_at FROM point_logs WHERE discord_id = $1 AND reason = $2 AND created_at >= $3 ORDER BY created_at DESC',
             [discord_id, `Claimed: ${type}`, startOfDay.getTime()]
         );
 
-        if (rows.length > 0) {
-            return res.status(400).json({ error: 'Already claimed today' });
+        const limit = type === 'online-reward' ? 6 : 1;
+        if (rows.length >= limit) {
+            return res.status(400).json({ error: type === 'online-reward' ? 'Reached maximum online rewards for today (6/6)' : 'Already claimed today' });
+        }
+        
+        if (type === 'online-reward' && rows.length > 0) {
+            const lastClaim = rows[0].created_at;
+            const ONE_HOUR = 60 * 60 * 1000;
+            if (Date.now() - lastClaim < ONE_HOUR) {
+                return res.status(400).json({ error: 'Must wait 1 hour between online claims' });
+            }
         }
 
         await query('UPDATE users SET points = points + $1 WHERE discord_id = $2', [amount, discord_id]);
