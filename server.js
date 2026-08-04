@@ -503,19 +503,147 @@ app.post('/admin/vip', async (req, res) => {
     }
 });
 
+// --- PROMO CODE ROUTES ---
+app.post('/api/redeem-promo', authenticateToken, async (req, res) => {
+    try {
+        const { code } = req.body;
+        const discord_id = req.user.id;
+
+        if (!code) {
+            return res.status(400).json({ error: 'Code is required' });
+        }
+
+        // Check if code exists and is valid
+        const { rows: promoRows } = await query('SELECT * FROM promo_codes WHERE code = $1', [code]);
+        if (promoRows.length === 0) {
+            return res.status(404).json({ error: 'Invalid code' });
+        }
+
+        const promo = promoRows[0];
+
+        // Check expiration
+        if (promo.expires_at && Date.now() > promo.expires_at) {
+            return res.status(400).json({ error: 'Code has expired' });
+        }
+
+        // Check usage limits
+        if (promo.max_uses !== -1 && promo.current_uses >= promo.max_uses) {
+            return res.status(400).json({ error: 'Code usage limit reached' });
+        }
+
+        // Check if user already claimed
+        const { rows: historyRows } = await query('SELECT * FROM promo_redemptions WHERE code = $1 AND discord_id = $2', [code, discord_id]);
+        if (historyRows.length > 0) {
+            return res.status(400).json({ error: 'You have already redeemed this code' });
+        }
+
+        // Process redemption
+        await query('BEGIN');
+        
+        // Grant points
+        await query('UPDATE users SET points = points + $1 WHERE discord_id = $2', [promo.points, discord_id]);
+        
+        // Log points
+        await query('INSERT INTO point_logs (discord_id, points_change, reason, created_at) VALUES ($1, $2, $3, $4)', [discord_id, promo.points, `Redeemed promo code: ${code}`, Date.now()]);
+        
+        // Update code uses
+        await query('UPDATE promo_codes SET current_uses = current_uses + 1 WHERE code = $1', [code]);
+        
+        // Record claim
+        await query('INSERT INTO promo_redemptions (code, discord_id, created_at) VALUES ($1, $2, $3)', [code, discord_id, Date.now()]);
+
+        await query('COMMIT');
+
+        res.json({ success: true, message: `Successfully redeemed code for ${promo.points} points!`, points: promo.points });
+
+    } catch (e) {
+        await query('ROLLBACK');
+        console.error('Redeem Promo Error:', e);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+app.get('/api/admin/setup-promo', async (req, res) => {
+    try {
+        const code = req.query.code || process.env.INITIAL_PROMO_CODE;
+        const points = parseInt(req.query.points) || parseInt(process.env.INITIAL_PROMO_POINTS) || 2222;
+
+        await query(`
+            CREATE TABLE IF NOT EXISTS promo_codes (
+                code VARCHAR(50) PRIMARY KEY,
+                points INT NOT NULL,
+                max_uses INT DEFAULT -1,
+                current_uses INT DEFAULT 0,
+                expires_at BIGINT,
+                created_at BIGINT NOT NULL
+            );
+        `);
+        
+        await query(`
+            CREATE TABLE IF NOT EXISTS promo_redemptions (
+                id SERIAL PRIMARY KEY,
+                code VARCHAR(50) REFERENCES promo_codes(code),
+                discord_id VARCHAR(255) REFERENCES users(discord_id),
+                created_at BIGINT NOT NULL,
+                UNIQUE(code, discord_id)
+            );
+        `);
+
+        if (code) {
+            await query(`
+                INSERT INTO promo_codes (code, points, created_at)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (code) DO NOTHING;
+            `, [code, points, Date.now()]);
+            return res.send(`Promo tables created and code ${code} for ${points} points added successfully!`);
+        }
+
+        res.send('Promo tables created successfully! (No code provided. Use ?code=YOURCODE&points=100 to add one)');
+    } catch (e) {
+        res.status(500).send('Error: ' + e.message);
+    }
+});
+
+app.get('/api/admin/add-promo', async (req, res) => {
+    try {
+        const code = req.query.code;
+        const points = parseInt(req.query.points);
+
+        if (!code || isNaN(points)) {
+            return res.status(400).send('Error: Please provide both code and points. Example: /api/admin/add-promo?code=GIFT50&points=50');
+        }
+
+        await query(`
+            INSERT INTO promo_codes (code, points, created_at)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (code) DO NOTHING;
+        `, [code, points, Date.now()]);
+
+        res.send(`✅ Success! Created new code: <b>${code}</b> for <b>${points}</b> points.`);
+    } catch (e) {
+        res.status(500).send('Error: ' + e.message);
+    }
+});
+
 // --- SETUP ROUTE ---
 app.get('/api/admin/setup-rewards', async (req, res) => {
     try {
         const { rows } = await query('SELECT * FROM rewards WHERE target_id = $1', ['HoNOpenACD']);
+        const thaiDesc = 'ปรับแต่งตัวเกม Heroes of Newerth (ปลดล็อกมุมกล้อง)';
+        
         if (rows.length === 0) {
             await query(
                 `INSERT INTO rewards (name, description, reward_type, target_id, cost, stock, image_url)
                  VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-                ['HoN Open ACD', 'Modify Heroes of Newerth gameplay (Control player camera distance)', 'mod', 'HoNOpenACD', 2222, -1, 'points card/icon.png']
+                ['HoN Open ACD', thaiDesc, 'mod', 'HoNOpenACD', 2222, -1, 'points card/icon.png']
             );
             res.send('Reward added successfully!');
         } else {
-            res.send('Reward already exists!');
+            await query(
+                `UPDATE rewards SET description = $1 WHERE target_id = $2`,
+                [thaiDesc, 'HoNOpenACD']
+            );
+            res.send('Reward description updated to Thai!');
         }
     } catch (e) {
         res.status(500).send('Error setting up rewards: ' + e.message);
@@ -704,11 +832,35 @@ async function runInitSql() {
     }
 }
 
+async function loadEnvPromos() {
+    const extraPromos = process.env.EXTRA_PROMOS;
+    if (!extraPromos) return;
+
+    const promos = extraPromos.split(',').map(s => s.trim()).filter(Boolean);
+    for (const p of promos) {
+        const [code, pts] = p.split(':');
+        const points = parseInt(pts);
+        if (code && !isNaN(points)) {
+            try {
+                await query(`
+                    INSERT INTO promo_codes (code, points, created_at)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (code) DO NOTHING;
+                `, [code.trim(), points, Date.now()]);
+                console.log(`[PROMO] Loaded promo code from env: ${code.trim()} for ${points} pts`);
+            } catch(e) {
+                console.error(`[PROMO] Error loading code ${code}:`, e.message);
+            }
+        }
+    }
+}
+
 async function start() {
     try {
         await query('SELECT 1');
         console.log('[DB] Connected to PostgreSQL');
         await runInitSql();
+        await loadEnvPromos();
         await refreshVipCache();
         server.listen(config.port, () => {
             console.log(`Server listening on port ${config.port} (${config.nodeEnv})`);

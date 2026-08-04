@@ -60,6 +60,23 @@ CREATE TABLE IF NOT EXISTS redemptions (
     created_at BIGINT
 );
 
+CREATE TABLE IF NOT EXISTS promo_codes (
+    code VARCHAR(50) PRIMARY KEY,
+    points INT NOT NULL,
+    max_uses INT DEFAULT -1, -- -1 for unlimited
+    current_uses INT DEFAULT 0,
+    expires_at BIGINT, -- NULL for no expiration
+    created_at BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS promo_redemptions (
+    id SERIAL PRIMARY KEY,
+    code VARCHAR(50) REFERENCES promo_codes(code),
+    discord_id VARCHAR(255) REFERENCES users(discord_id),
+    created_at BIGINT NOT NULL,
+    UNIQUE(code, discord_id)
+);
+
 CREATE TABLE IF NOT EXISTS mod_unlocks (
     discord_id VARCHAR(255) REFERENCES users(discord_id),
     mod_id VARCHAR(255) NOT NULL,
