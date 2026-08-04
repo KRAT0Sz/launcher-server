@@ -47,6 +47,10 @@ CREATE TABLE IF NOT EXISTS rewards (
     image_url TEXT
 );
 
+INSERT INTO rewards (name, description, reward_type, target_id, cost, stock, image_url)
+VALUES ('HoN Open ACD', 'Modify Heroes of Newerth gameplay (Control player camera distance)', 'mod', 'HoNOpenACD', 2222, -1, 'points card/icon.png')
+ON CONFLICT DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS redemptions (
     redemption_id SERIAL PRIMARY KEY,
     discord_id VARCHAR(255) REFERENCES users(discord_id),

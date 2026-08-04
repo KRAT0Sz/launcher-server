@@ -503,6 +503,25 @@ app.post('/admin/vip', async (req, res) => {
     }
 });
 
+// --- SETUP ROUTE ---
+app.get('/api/admin/setup-rewards', async (req, res) => {
+    try {
+        const { rows } = await query('SELECT * FROM rewards WHERE target_id = $1', ['HoNOpenACD']);
+        if (rows.length === 0) {
+            await query(
+                `INSERT INTO rewards (name, description, reward_type, target_id, cost, stock, image_url)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                ['HoN Open ACD', 'Modify Heroes of Newerth gameplay (Control player camera distance)', 'mod', 'HoNOpenACD', 2222, -1, 'points card/icon.png']
+            );
+            res.send('Reward added successfully!');
+        } else {
+            res.send('Reward already exists!');
+        }
+    } catch (e) {
+        res.status(500).send('Error setting up rewards: ' + e.message);
+    }
+});
+
 // =====================================================
 // HTTP + Socket.IO
 // =====================================================
