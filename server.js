@@ -311,7 +311,17 @@ app.get('/api/me', authenticateToken, async (req, res) => {
     try {
         const { rows } = await query('SELECT discord_id, username, avatar_url, points, role FROM users WHERE discord_id = $1', [req.user.discord_id]);
         if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
-        res.json(rows[0]);
+        
+        const startOfDay = new Date();
+        startOfDay.setHours(0, 0, 0, 0);
+        const { rows: claims } = await query(
+            "SELECT reason FROM point_logs WHERE discord_id = $1 AND reason LIKE 'Claimed: %' AND created_at >= $2",
+            [req.user.discord_id, startOfDay.getTime()]
+        );
+        
+        const user = rows[0];
+        user.claimsToday = claims.map(c => c.reason.replace('Claimed: ', ''));
+        res.json(user);
     } catch (e) {
         res.status(500).json({ error: 'Database error' });
     }
