@@ -358,7 +358,7 @@ app.post('/api/redeem', authenticateToken, async (req, res) => {
 
         // Deduct points
         await query('UPDATE users SET points = points - $1 WHERE discord_id = $2', [reward.cost, discord_id]);
-        await query('INSERT INTO point_logs (discord_id, points_change, reason, created_at) VALUES ($1, $2, $3, $4)', [discord_id, -reward.cost, \`Redeemed: \${reward.name}\`, Date.now()]);
+        await query('INSERT INTO point_logs (discord_id, points_change, reason, created_at) VALUES ($1, $2, $3, $4)', [discord_id, -reward.cost, `Redeemed: ${reward.name}`, Date.now()]);
         
         // If it's a mod unlock
         if (reward.reward_type === 'mod') {
