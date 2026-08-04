@@ -36,7 +36,7 @@ const config = {
     discord: {
         clientId: process.env.DISCORD_CLIENT_ID || '',
         clientSecret: process.env.DISCORD_CLIENT_SECRET || '',
-        redirectUri: process.env.DISCORD_REDIRECT_URI || 'http://localhost:3000/auth/discord/callback',
+        redirectUri: process.env.DISCORD_REDIRECT_URI || (process.env.NODE_ENV === 'production' ? 'https://launcher-counter.onrender.com/auth/discord/callback' : 'http://localhost:3000/auth/discord/callback'),
     },
     jwtSecret: process.env.JWT_SECRET || 'honforge-super-secret-key-change-in-prod',
 };
@@ -286,15 +286,17 @@ app.get('/auth/discord/callback', async (req, res) => {
         // Generate JWT
         const token = jwt.sign({ discord_id: discordId, username, role: 'user' }, config.jwtSecret, { expiresIn: '30d' });
 
-        // Redirect back to the launcher custom protocol or show a success page
+        // Respond with HTML that sets the page title to the token. Electron will intercept this.
         res.send(`
             <html>
+                <head>
+                    <title>AUTH_TOKEN:${token}</title>
+                </head>
                 <body>
+                    <h2>Login successful! You can close this window.</h2>
                     <script>
-                        window.location.href = "honforge://auth?token=${token}";
                         setTimeout(() => window.close(), 2000);
                     </script>
-                    <h2>Login successful! You can close this window.</h2>
                 </body>
             </html>
         `);
