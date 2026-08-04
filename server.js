@@ -17,7 +17,10 @@ const jwt = require('jsonwebtoken');
 const config = {
     port: parseInt(process.env.PORT || '3000', 10),
     nodeEnv: process.env.NODE_ENV || 'development',
-    db: {
+    db: process.env.DATABASE_URL ? {
+        connectionString: process.env.DATABASE_URL,
+        ssl: { rejectUnauthorized: false }
+    } : {
         host: process.env.DB_HOST || 'localhost',
         port: parseInt(process.env.DB_PORT || '5432', 10),
         database: process.env.DB_NAME || 'honforge',
@@ -651,7 +654,7 @@ async function start() {
             console.log(`Server listening on port ${config.port} (${config.nodeEnv})`);
         });
     } catch (e) {
-        console.error('[FATAL] Failed to start:', e.message);
+        console.error('[FATAL] Failed to start:', e.message || e);
         process.exit(1);
     }
 }
