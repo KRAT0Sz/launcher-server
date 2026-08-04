@@ -507,7 +507,7 @@ app.post('/admin/vip', async (req, res) => {
 app.post('/api/redeem-promo', authenticateToken, async (req, res) => {
     try {
         const { code } = req.body;
-        const discord_id = req.user.id;
+        const discord_id = req.user.discord_id;
 
         if (!code) {
             return res.status(400).json({ error: 'Code is required' });
