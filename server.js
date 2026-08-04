@@ -505,17 +505,23 @@ app.post('/admin/vip', async (req, res) => {
 
 // --- PROMO CODE ROUTES ---
 app.post('/api/redeem-promo', authenticateToken, async (req, res) => {
+    const client = await pool.connect();
     try {
         const { code } = req.body;
         const discord_id = req.user.discord_id;
 
         if (!code) {
+            client.release();
             return res.status(400).json({ error: 'Code is required' });
         }
 
+        await client.query('BEGIN');
+
         // Check if code exists and is valid
-        const { rows: promoRows } = await query('SELECT * FROM promo_codes WHERE code = $1', [code]);
+        const { rows: promoRows } = await client.query('SELECT * FROM promo_codes WHERE code = $1 FOR UPDATE', [code]);
         if (promoRows.length === 0) {
+            await client.query('ROLLBACK');
+            client.release();
             return res.status(404).json({ error: 'Invalid code' });
         }
 
@@ -523,41 +529,46 @@ app.post('/api/redeem-promo', authenticateToken, async (req, res) => {
 
         // Check expiration
         if (promo.expires_at && Date.now() > promo.expires_at) {
+            await client.query('ROLLBACK');
+            client.release();
             return res.status(400).json({ error: 'Code has expired' });
         }
 
         // Check usage limits
         if (promo.max_uses !== -1 && promo.current_uses >= promo.max_uses) {
+            await client.query('ROLLBACK');
+            client.release();
             return res.status(400).json({ error: 'Code usage limit reached' });
         }
 
         // Check if user already claimed
-        const { rows: historyRows } = await query('SELECT * FROM promo_redemptions WHERE code = $1 AND discord_id = $2', [code, discord_id]);
+        const { rows: historyRows } = await client.query('SELECT * FROM promo_redemptions WHERE code = $1 AND discord_id = $2', [code, discord_id]);
         if (historyRows.length > 0) {
+            await client.query('ROLLBACK');
+            client.release();
             return res.status(400).json({ error: 'You have already redeemed this code' });
         }
-
-        // Process redemption
-        await query('BEGIN');
         
         // Grant points
-        await query('UPDATE users SET points = points + $1 WHERE discord_id = $2', [promo.points, discord_id]);
+        await client.query('UPDATE users SET points = points + $1 WHERE discord_id = $2', [promo.points, discord_id]);
         
         // Log points
-        await query('INSERT INTO point_logs (discord_id, points_change, reason, created_at) VALUES ($1, $2, $3, $4)', [discord_id, promo.points, `Redeemed promo code: ${code}`, Date.now()]);
+        await client.query('INSERT INTO point_logs (discord_id, points_change, reason, created_at) VALUES ($1, $2, $3, $4)', [discord_id, promo.points, `Redeemed promo code: ${code}`, Date.now()]);
         
         // Update code uses
-        await query('UPDATE promo_codes SET current_uses = current_uses + 1 WHERE code = $1', [code]);
+        await client.query('UPDATE promo_codes SET current_uses = current_uses + 1 WHERE code = $1', [code]);
         
         // Record claim
-        await query('INSERT INTO promo_redemptions (code, discord_id, created_at) VALUES ($1, $2, $3)', [code, discord_id, Date.now()]);
+        await client.query('INSERT INTO promo_redemptions (code, discord_id, created_at) VALUES ($1, $2, $3)', [code, discord_id, Date.now()]);
 
-        await query('COMMIT');
+        await client.query('COMMIT');
+        client.release();
 
         res.json({ success: true, message: `Successfully redeemed code for ${promo.points} points!`, points: promo.points });
 
     } catch (e) {
-        await query('ROLLBACK');
+        await client.query('ROLLBACK');
+        client.release();
         console.error('Redeem Promo Error:', e);
         res.status(500).json({ error: 'Internal server error' });
     }
