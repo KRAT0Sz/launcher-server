@@ -11,6 +11,18 @@ const fs = require('fs');
 const axios = require('axios');
 const jwt = require('jsonwebtoken');
 
+// Helper: get start of today in Thailand timezone (UTC+7)
+function getStartOfDayTH() {
+    const now = new Date();
+    // Current time in Thailand = UTC + 7 hours
+    const thaiOffsetMs = 7 * 60 * 60 * 1000;
+    const nowThai = new Date(now.getTime() + thaiOffsetMs);
+    // Midnight in Thai time (as UTC timestamp)
+    const midnightThai = new Date(Date.UTC(nowThai.getUTCFullYear(), nowThai.getUTCMonth(), nowThai.getUTCDate()));
+    // Convert back: midnight Thai in UTC = midnight_thai - 7h
+    return new Date(midnightThai.getTime() - thaiOffsetMs);
+}
+
 // =====================================================
 // Environment configuration
 // =====================================================
@@ -331,8 +343,7 @@ app.get('/api/me', authenticateToken, async (req, res) => {
         const { rows } = await query('SELECT discord_id, username, avatar_url, points, role FROM users WHERE discord_id = $1', [discordId]);
         if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
         
-        const startOfDay = new Date();
-        startOfDay.setHours(0, 0, 0, 0);
+        const startOfDay = getStartOfDayTH();
         const { rows: claims } = await query(
             "SELECT reason FROM point_logs WHERE discord_id = $1 AND reason LIKE 'Claimed: %' AND created_at >= $2",
             [discordId, startOfDay.getTime()]
@@ -756,8 +767,7 @@ app.post('/api/points/claim/:type', authenticateToken, async (req, res) => {
     if (amount === 0) return res.status(400).json({ error: 'Invalid claim type' });
 
     try {
-        const startOfDay = new Date();
-        startOfDay.setHours(0, 0, 0, 0);
+        const startOfDay = getStartOfDayTH();
         
         if (type === 'daily-reward') {
             const { rows: todayClaims } = await query(
