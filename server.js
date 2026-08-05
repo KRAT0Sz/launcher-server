@@ -476,6 +476,25 @@ app.post('/api/community/posts/:id/like', authenticateToken, async (req, res) =>
     }
 });
 
+async function checkUserMuted(discordId) {
+    if (!discordId) return { isMuted: false };
+    try {
+        const { rows } = await query('SELECT banned_until FROM users WHERE discord_id = $1', [discordId]);
+        if (rows.length > 0 && rows[0].banned_until) {
+            const bannedUntil = Number(rows[0].banned_until);
+            const now = Date.now();
+            if (bannedUntil === -1) {
+                return { isMuted: true, message: '🚫 บัญชีของคุณถูกแบนถาวรจากการส่งข้อความในชุมชน' };
+            }
+            if (bannedUntil > now) {
+                const remainingMinutes = Math.ceil((bannedUntil - now) / (1000 * 60));
+                return { isMuted: true, message: `⏳ คุณถูกระงับการส่งข้อความชั่วคราว เหลือเวลาอีก ${remainingMinutes} นาที` };
+            }
+        }
+    } catch (e) {}
+    return { isMuted: false };
+}
+
 // Auto Init Database Schema Helper
 async function initDatabaseSchema() {
     try {
@@ -486,8 +505,11 @@ async function initDatabaseSchema() {
                 avatar_url TEXT,
                 points INT DEFAULT 0,
                 role VARCHAR(50) DEFAULT 'user',
-                created_at BIGINT NOT NULL
+                created_at BIGINT NOT NULL,
+                banned_until BIGINT DEFAULT 0
             );
+
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS banned_until BIGINT DEFAULT 0;
 
             CREATE TABLE IF NOT EXISTS community_posts (
                 post_id SERIAL PRIMARY KEY,
@@ -577,6 +599,96 @@ app.post('/api/community/posts/:id/replies', authenticateToken, async (req, res)
     } catch (e) {
         console.error('Failed to create reply:', e);
         res.status(500).json({ error: 'Failed to save reply' });
+    }
+});
+
+// =====================================================
+// Moderation Endpoints (DEV / MOD Role)
+// =====================================================
+
+// Delete Post API (DEV / MOD or Post Owner)
+app.delete('/api/community/posts/:id', authenticateToken, async (req, res) => {
+    const postId = parseInt(req.params.id, 10);
+    if (isNaN(postId)) return res.status(400).json({ error: 'Invalid post ID' });
+
+    try {
+        const { rows } = await query('SELECT discord_id FROM community_posts WHERE post_id = $1', [postId]);
+        if (rows.length === 0) return res.status(404).json({ error: 'Post not found' });
+
+        const postOwner = rows[0].discord_id;
+        const userRole = getUserRole(req.user.discord_id);
+        const isMod = userRole === 'DEV' || userRole === 'MOD' || req.user.discord_id === postOwner;
+
+        if (!isMod) {
+            return res.status(403).json({ error: 'Permission denied' });
+        }
+
+        await query('DELETE FROM community_posts WHERE post_id = $1', [postId]);
+        res.json({ success: true, message: 'Post deleted successfully' });
+    } catch (e) {
+        console.error('Failed to delete post:', e);
+        res.status(500).json({ error: 'Database error' });
+    }
+});
+
+// Delete Reply API (DEV / MOD or Reply Owner)
+app.delete('/api/community/replies/:replyId', authenticateToken, async (req, res) => {
+    const replyId = parseInt(req.params.replyId, 10);
+    if (isNaN(replyId)) return res.status(400).json({ error: 'Invalid reply ID' });
+
+    try {
+        const { rows } = await query('SELECT discord_id, post_id FROM post_replies WHERE reply_id = $1', [replyId]);
+        if (rows.length === 0) return res.status(404).json({ error: 'Reply not found' });
+
+        const replyOwner = rows[0].discord_id;
+        const postId = rows[0].post_id;
+        const userRole = getUserRole(req.user.discord_id);
+        const isMod = userRole === 'DEV' || userRole === 'MOD' || req.user.discord_id === replyOwner;
+
+        if (!isMod) {
+            return res.status(403).json({ error: 'Permission denied' });
+        }
+
+        await query('DELETE FROM post_replies WHERE reply_id = $1', [replyId]);
+        const countRes = await query('SELECT COUNT(*)::int as count FROM post_replies WHERE post_id = $1', [postId]);
+        res.json({ success: true, message: 'Reply deleted successfully', replies_count: countRes.rows[0].count });
+    } catch (e) {
+        console.error('Failed to delete reply:', e);
+        res.status(500).json({ error: 'Database error' });
+    }
+});
+
+// Mute / Ban / Timeout User API (DEV / MOD Only)
+app.post('/api/community/users/:targetDiscordId/mute', authenticateToken, async (req, res) => {
+    const userRole = getUserRole(req.user.discord_id);
+    if (userRole !== 'DEV' && userRole !== 'MOD') {
+        return res.status(403).json({ error: 'Only DEV and MOD roles can moderate users.' });
+    }
+
+    const targetDiscordId = req.params.targetDiscordId;
+    const { durationMinutes } = req.body; // 10, 60, 1440, -1 (permanent ban), 0 (unmute)
+
+    let bannedUntil = 0;
+    if (durationMinutes === -1) {
+        bannedUntil = -1; // Permanent ban
+    } else if (durationMinutes > 0) {
+        bannedUntil = Date.now() + (durationMinutes * 60 * 1000);
+    } else {
+        bannedUntil = 0; // Unmute
+    }
+
+    try {
+        await query(
+            `INSERT INTO users (discord_id, username, created_at, banned_until)
+             VALUES ($1, 'User', $2, $3)
+             ON CONFLICT (discord_id) DO UPDATE SET banned_until = EXCLUDED.banned_until`,
+            [targetDiscordId, Date.now(), bannedUntil]
+        );
+
+        res.json({ success: true, targetDiscordId, bannedUntil });
+    } catch (e) {
+        console.error('Failed to mute user:', e);
+        res.status(500).json({ error: 'Database error' });
     }
 });
 
