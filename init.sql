@@ -60,6 +60,16 @@ CREATE TABLE IF NOT EXISTS redemptions (
     created_at BIGINT
 );
 
+-- Community Board Posts Table
+CREATE TABLE IF NOT EXISTS community_posts (
+    post_id SERIAL PRIMARY KEY,
+    discord_id VARCHAR(255) REFERENCES users(discord_id),
+    username VARCHAR(255) NOT NULL,
+    avatar_url TEXT,
+    content TEXT NOT NULL,
+    created_at BIGINT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS promo_codes (
     code VARCHAR(50) PRIMARY KEY,
     points INT NOT NULL,

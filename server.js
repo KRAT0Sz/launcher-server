@@ -39,7 +39,19 @@ const config = {
         redirectUri: process.env.DISCORD_REDIRECT_URI || (process.env.NODE_ENV === 'production' ? 'https://launcher-counter.onrender.com/auth/discord/callback' : 'http://localhost:3000/auth/discord/callback'),
     },
     jwtSecret: process.env.JWT_SECRET || 'honforge-super-secret-key-change-in-prod',
+    roles: {
+        devIds: (process.env.DEV_DISCORD_IDS || '').split(',').map(s => s.trim()).filter(Boolean),
+        modIds: (process.env.MOD_DISCORD_IDS || '').split(',').map(s => s.trim()).filter(Boolean),
+    }
 };
+
+function getUserRole(discordId) {
+    if (!discordId) return 'user';
+    const strId = String(discordId).trim();
+    if (config.roles.devIds.includes(strId)) return 'DEV';
+    if (config.roles.modIds.includes(strId)) return 'MOD';
+    return 'user';
+}
 
 const startedAt = Date.now();
 
@@ -273,18 +285,20 @@ app.get('/auth/discord/callback', async (req, res) => {
         const discordId = profile.id;
         const username = profile.username;
         const avatarUrl = profile.avatar ? `https://cdn.discordapp.com/avatars/${discordId}/${profile.avatar}.png` : null;
-        
+        const role = getUserRole(discordId);
+
         // Upsert user to DB
         await query(`
-            INSERT INTO users (discord_id, username, avatar_url, created_at) 
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO users (discord_id, username, avatar_url, role, created_at) 
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (discord_id) DO UPDATE SET 
                 username = EXCLUDED.username, 
-                avatar_url = EXCLUDED.avatar_url
-        `, [discordId, username, avatarUrl, Date.now()]);
+                avatar_url = EXCLUDED.avatar_url,
+                role = EXCLUDED.role
+        `, [discordId, username, avatarUrl, role, Date.now()]);
 
         // Generate JWT
-        const token = jwt.sign({ discord_id: discordId, username, role: 'user' }, config.jwtSecret, { expiresIn: '30d' });
+        const token = jwt.sign({ discord_id: discordId, username, role }, config.jwtSecret, { expiresIn: '30d' });
 
         // Respond with HTML that sets the page title to the token. Electron will intercept this.
         res.send(`
@@ -309,17 +323,23 @@ app.get('/auth/discord/callback', async (req, res) => {
 // Points & Profile API
 app.get('/api/me', authenticateToken, async (req, res) => {
     try {
-        const { rows } = await query('SELECT discord_id, username, avatar_url, points, role FROM users WHERE discord_id = $1', [req.user.discord_id]);
+        const discordId = req.user.discord_id;
+        const computedRole = getUserRole(discordId);
+
+        await query('UPDATE users SET role = $1 WHERE discord_id = $2', [computedRole, discordId]);
+
+        const { rows } = await query('SELECT discord_id, username, avatar_url, points, role FROM users WHERE discord_id = $1', [discordId]);
         if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
         
         const startOfDay = new Date();
         startOfDay.setHours(0, 0, 0, 0);
         const { rows: claims } = await query(
             "SELECT reason FROM point_logs WHERE discord_id = $1 AND reason LIKE 'Claimed: %' AND created_at >= $2",
-            [req.user.discord_id, startOfDay.getTime()]
+            [discordId, startOfDay.getTime()]
         );
         
         const user = rows[0];
+        user.role = computedRole;
         user.claimsToday = claims.map(c => c.reason.replace('Claimed: ', ''));
         res.json(user);
     } catch (e) {
@@ -351,6 +371,49 @@ app.get('/api/rewards', async (req, res) => {
         res.json(rows);
     } catch (e) {
         res.status(500).json({ error: 'Database error' });
+    }
+});
+
+// =====================================================
+// Community Posts APIs
+// =====================================================
+app.get('/api/community/posts', async (req, res) => {
+    try {
+        const { rows } = await query(
+            `SELECT p.post_id, p.discord_id, p.username, p.avatar_url, p.content, p.created_at
+             FROM community_posts p
+             ORDER BY p.created_at DESC
+             LIMIT 100`
+        );
+        res.json(rows);
+    } catch (e) {
+        console.error('Failed to fetch community posts:', e);
+        res.status(500).json({ error: 'Database error' });
+    }
+});
+
+app.post('/api/community/posts', authenticateToken, async (req, res) => {
+    const { content } = req.body;
+    if (!content || typeof content !== 'string' || content.trim().length === 0 || content.trim().length > 500) {
+        return res.status(400).json({ error: 'Content must be between 1 and 500 characters.' });
+    }
+
+    try {
+        const discord_id = req.user.discord_id;
+        const username = req.user.username;
+        const avatar_url = req.user.avatar_url || 'https://cdn.discordapp.com/embed/avatars/0.png';
+
+        const { rows } = await query(
+            `INSERT INTO community_posts (discord_id, username, avatar_url, content, created_at)
+             VALUES ($1, $2, $3, $4, $5)
+             RETURNING *`,
+            [discord_id, username, avatar_url, content.trim(), Date.now()]
+        );
+
+        res.json({ success: true, post: rows[0] });
+    } catch (e) {
+        console.error('Failed to create community post:', e);
+        res.status(500).json({ error: 'Failed to save post' });
     }
 });
 
