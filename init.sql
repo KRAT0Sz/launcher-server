@@ -67,8 +67,11 @@ CREATE TABLE IF NOT EXISTS community_posts (
     username VARCHAR(255) NOT NULL,
     avatar_url TEXT,
     content TEXT NOT NULL,
+    category VARCHAR(50) DEFAULT 'general',
     created_at BIGINT NOT NULL
 );
+
+ALTER TABLE community_posts ADD COLUMN IF NOT EXISTS category VARCHAR(50) DEFAULT 'general';
 
 CREATE TABLE IF NOT EXISTS promo_codes (
     code VARCHAR(50) PRIMARY KEY,

@@ -298,7 +298,7 @@ app.get('/auth/discord/callback', async (req, res) => {
         `, [discordId, username, avatarUrl, role, Date.now()]);
 
         // Generate JWT
-        const token = jwt.sign({ discord_id: discordId, username, role }, config.jwtSecret, { expiresIn: '30d' });
+        const token = jwt.sign({ discord_id: discordId, username, avatar_url: avatarUrl, role }, config.jwtSecret, { expiresIn: '30d' });
 
         // Respond with HTML that sets the page title to the token. Electron will intercept this.
         res.send(`
@@ -379,13 +379,27 @@ app.get('/api/rewards', async (req, res) => {
 // =====================================================
 app.get('/api/community/posts', async (req, res) => {
     try {
-        const { rows } = await query(
-            `SELECT p.post_id, p.discord_id, p.username, p.avatar_url, p.content, p.created_at
-             FROM community_posts p
-             ORDER BY p.created_at DESC
-             LIMIT 100`
-        );
-        res.json(rows);
+        const { category } = req.query;
+        let queryStr = `
+            SELECT p.post_id, p.discord_id, COALESCE(u.username, p.username) as username, COALESCE(u.avatar_url, p.avatar_url) as avatar_url, p.content, COALESCE(p.category, 'general') as category, p.created_at, COALESCE(u.role, 'user') as role
+            FROM community_posts p
+            LEFT JOIN users u ON p.discord_id = u.discord_id
+        `;
+        const queryParams = [];
+
+        if (category && category !== 'all') {
+            queryStr += ` WHERE p.category = $1`;
+            queryParams.push(category);
+        }
+
+        queryStr += ` ORDER BY p.created_at DESC LIMIT 100`;
+
+        const { rows } = await query(queryStr, queryParams);
+        const postsWithRoles = rows.map(r => ({
+            ...r,
+            role: getUserRole(r.discord_id) !== 'user' ? getUserRole(r.discord_id) : (r.role || 'user')
+        }));
+        res.json(postsWithRoles);
     } catch (e) {
         console.error('Failed to fetch community posts:', e);
         res.status(500).json({ error: 'Database error' });
@@ -393,21 +407,26 @@ app.get('/api/community/posts', async (req, res) => {
 });
 
 app.post('/api/community/posts', authenticateToken, async (req, res) => {
-    const { content } = req.body;
+    const { content, category } = req.body;
     if (!content || typeof content !== 'string' || content.trim().length === 0 || content.trim().length > 500) {
         return res.status(400).json({ error: 'Content must be between 1 and 500 characters.' });
     }
 
+    const validCategories = ['general', 'bug', 'help', 'suggestion'];
+    const safeCategory = validCategories.includes(category) ? category : 'general';
+
     try {
         const discord_id = req.user.discord_id;
-        const username = req.user.username;
-        const avatar_url = req.user.avatar_url || 'https://cdn.discordapp.com/embed/avatars/0.png';
+        const userRes = await query('SELECT username, avatar_url FROM users WHERE discord_id = $1', [discord_id]);
+        const dbUser = userRes.rows[0] || {};
+        const username = dbUser.username || req.user.username || 'Anonymous';
+        const avatar_url = dbUser.avatar_url || req.user.avatar_url || 'https://cdn.discordapp.com/embed/avatars/0.png';
 
         const { rows } = await query(
-            `INSERT INTO community_posts (discord_id, username, avatar_url, content, created_at)
-             VALUES ($1, $2, $3, $4, $5)
+            `INSERT INTO community_posts (discord_id, username, avatar_url, content, category, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6)
              RETURNING *`,
-            [discord_id, username, avatar_url, content.trim(), Date.now()]
+            [discord_id, username, avatar_url, content.trim(), safeCategory, Date.now()]
         );
 
         res.json({ success: true, post: rows[0] });
