@@ -380,13 +380,30 @@ app.get('/api/rewards', async (req, res) => {
 app.get('/api/community/posts', async (req, res) => {
     try {
         const { category } = req.query;
-        let queryStr = `
-            SELECT p.post_id, p.discord_id, COALESCE(u.username, p.username) as username, COALESCE(u.avatar_url, p.avatar_url) as avatar_url, p.content, COALESCE(p.category, 'general') as category, p.created_at, COALESCE(u.role, 'user') as role
-            FROM community_posts p
-            LEFT JOIN users u ON p.discord_id = u.discord_id
-        `;
-        const queryParams = [];
+        let authDiscordId = null;
 
+        const authHeader = req.headers.authorization;
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+            try {
+                const decoded = jwt.verify(authHeader.split(' ')[1], config.jwtSecret);
+                authDiscordId = decoded.discord_id;
+            } catch (e) {}
+        }
+
+        let queryStr = `
+            SELECT p.post_id, p.discord_id, COALESCE(u.username, p.username) as username, COALESCE(u.avatar_url, p.avatar_url) as avatar_url, p.content, COALESCE(p.category, 'general') as category, p.created_at, COALESCE(u.role, 'user') as role,
+                   (SELECT COUNT(*)::int FROM post_likes l WHERE l.post_id = p.post_id) as likes_count,
+                   (SELECT COUNT(*)::int FROM post_replies r WHERE r.post_id = p.post_id) as replies_count
+        `;
+        if (authDiscordId) {
+            queryStr += `, EXISTS(SELECT 1 FROM post_likes l WHERE l.post_id = p.post_id AND l.discord_id = '${authDiscordId}') as user_liked`;
+        } else {
+            queryStr += `, false as user_liked`;
+        }
+
+        queryStr += ` FROM community_posts p LEFT JOIN users u ON p.discord_id = u.discord_id`;
+
+        const queryParams = [];
         if (category && category !== 'all') {
             queryStr += ` WHERE p.category = $1`;
             queryParams.push(category);
@@ -433,6 +450,133 @@ app.post('/api/community/posts', authenticateToken, async (req, res) => {
     } catch (e) {
         console.error('Failed to create community post:', e);
         res.status(500).json({ error: 'Failed to save post' });
+    }
+});
+
+// Like / Unlike Post API
+app.post('/api/community/posts/:id/like', authenticateToken, async (req, res) => {
+    const postId = parseInt(req.params.id, 10);
+    const discordId = req.user.discord_id;
+
+    try {
+        const existing = await query('SELECT 1 FROM post_likes WHERE post_id = $1 AND discord_id = $2', [postId, discordId]);
+        let liked = false;
+        if (existing.rows.length > 0) {
+            await query('DELETE FROM post_likes WHERE post_id = $1 AND discord_id = $2', [postId, discordId]);
+            liked = false;
+        } else {
+            await query('INSERT INTO post_likes (post_id, discord_id, created_at) VALUES ($1, $2, $3)', [postId, discordId, Date.now()]);
+            liked = true;
+        }
+        const countRes = await query('SELECT COUNT(*)::int as count FROM post_likes WHERE post_id = $1', [postId]);
+        res.json({ success: true, liked, likes_count: countRes.rows[0].count });
+    } catch (e) {
+        console.error('Failed to toggle like:', e);
+        res.status(500).json({ error: 'Database error' });
+    }
+});
+
+// Auto Init Database Schema Helper
+async function initDatabaseSchema() {
+    try {
+        await query(`
+            CREATE TABLE IF NOT EXISTS users (
+                discord_id VARCHAR(255) PRIMARY KEY,
+                username VARCHAR(255) NOT NULL,
+                avatar_url TEXT,
+                points INT DEFAULT 0,
+                role VARCHAR(50) DEFAULT 'user',
+                created_at BIGINT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS community_posts (
+                post_id SERIAL PRIMARY KEY,
+                discord_id VARCHAR(255) REFERENCES users(discord_id),
+                username VARCHAR(255) NOT NULL,
+                avatar_url TEXT,
+                content TEXT NOT NULL,
+                category VARCHAR(50) DEFAULT 'general',
+                created_at BIGINT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS post_likes (
+                post_id INT REFERENCES community_posts(post_id) ON DELETE CASCADE,
+                discord_id VARCHAR(255) REFERENCES users(discord_id) ON DELETE CASCADE,
+                created_at BIGINT NOT NULL,
+                PRIMARY KEY (post_id, discord_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS post_replies (
+                reply_id SERIAL PRIMARY KEY,
+                post_id INT REFERENCES community_posts(post_id) ON DELETE CASCADE,
+                discord_id VARCHAR(255) REFERENCES users(discord_id) ON DELETE CASCADE,
+                username VARCHAR(255) NOT NULL,
+                avatar_url TEXT,
+                content TEXT NOT NULL,
+                created_at BIGINT NOT NULL
+            );
+        `);
+        console.log('Database tables verified/initialized successfully.');
+    } catch (e) {
+        console.error('Failed to init DB schema:', e.message);
+    }
+}
+initDatabaseSchema();
+
+// Get Post Replies API
+app.get('/api/community/posts/:id/replies', async (req, res) => {
+    const postId = parseInt(req.params.id, 10);
+    if (isNaN(postId)) return res.json([]);
+
+    try {
+        const { rows } = await query(
+            `SELECT r.reply_id, r.post_id, r.discord_id, COALESCE(u.username, r.username) as username, COALESCE(u.avatar_url, r.avatar_url) as avatar_url, r.content, r.created_at, COALESCE(u.role, 'user') as role
+             FROM post_replies r
+             LEFT JOIN users u ON r.discord_id = u.discord_id
+             WHERE r.post_id = $1
+             ORDER BY r.created_at ASC`,
+            [postId]
+        );
+        const repliesWithRoles = rows.map(r => ({
+            ...r,
+            role: getUserRole(r.discord_id) !== 'user' ? getUserRole(r.discord_id) : (r.role || 'user')
+        }));
+        res.json(repliesWithRoles);
+    } catch (e) {
+        console.error('Failed to fetch post replies:', e);
+        initDatabaseSchema().catch(() => {});
+        res.json([]);
+    }
+});
+
+// Add Reply API
+app.post('/api/community/posts/:id/replies', authenticateToken, async (req, res) => {
+    const postId = parseInt(req.params.id, 10);
+    const { content } = req.body;
+    if (!content || typeof content !== 'string' || content.trim().length === 0 || content.trim().length > 300) {
+        return res.status(400).json({ error: 'Reply content must be between 1 and 300 characters.' });
+    }
+
+    try {
+        const discordId = req.user.discord_id;
+        const userRes = await query('SELECT username, avatar_url FROM users WHERE discord_id = $1', [discordId]);
+        const dbUser = userRes.rows[0] || {};
+        const username = dbUser.username || req.user.username || 'Anonymous';
+        const avatarUrl = dbUser.avatar_url || req.user.avatar_url || 'https://cdn.discordapp.com/embed/avatars/0.png';
+
+        const { rows } = await query(
+            `INSERT INTO post_replies (post_id, discord_id, username, avatar_url, content, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING *`,
+            [postId, discordId, username, avatarUrl, content.trim(), Date.now()]
+        );
+
+        const countRes = await query('SELECT COUNT(*)::int as count FROM post_replies WHERE post_id = $1', [postId]);
+
+        res.json({ success: true, reply: rows[0], replies_count: countRes.rows[0].count });
+    } catch (e) {
+        console.error('Failed to create reply:', e);
+        res.status(500).json({ error: 'Failed to save reply' });
     }
 });
 

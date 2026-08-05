@@ -73,6 +73,25 @@ CREATE TABLE IF NOT EXISTS community_posts (
 
 ALTER TABLE community_posts ADD COLUMN IF NOT EXISTS category VARCHAR(50) DEFAULT 'general';
 
+-- Community Post Likes Table
+CREATE TABLE IF NOT EXISTS post_likes (
+    post_id INT REFERENCES community_posts(post_id) ON DELETE CASCADE,
+    discord_id VARCHAR(255) REFERENCES users(discord_id) ON DELETE CASCADE,
+    created_at BIGINT NOT NULL,
+    PRIMARY KEY (post_id, discord_id)
+);
+
+-- Community Post Replies Table
+CREATE TABLE IF NOT EXISTS post_replies (
+    reply_id SERIAL PRIMARY KEY,
+    post_id INT REFERENCES community_posts(post_id) ON DELETE CASCADE,
+    discord_id VARCHAR(255) REFERENCES users(discord_id) ON DELETE CASCADE,
+    username VARCHAR(255) NOT NULL,
+    avatar_url TEXT,
+    content TEXT NOT NULL,
+    created_at BIGINT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS promo_codes (
     code VARCHAR(50) PRIMARY KEY,
     points INT NOT NULL,
