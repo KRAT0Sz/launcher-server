@@ -264,12 +264,26 @@ app.get('/github-releases', async (req, res) => {
 // =====================================================
 app.get('/auth/discord', (req, res) => {
     if (!config.discord.clientId) return res.status(500).send('Discord Auth not configured');
-    const url = `https://discord.com/api/oauth2/authorize?client_id=${config.discord.clientId}&redirect_uri=${encodeURIComponent(config.discord.redirectUri)}&response_type=code&scope=identify`;
+    
+    // Support redirect back parameter from frontend
+    const returnUrl = req.query.redirect || req.headers.referer || 'https://newerthforge.netlify.app';
+    const state = Buffer.from(returnUrl).toString('base64');
+    
+    const url = `https://discord.com/api/oauth2/authorize?client_id=${config.discord.clientId}&redirect_uri=${encodeURIComponent(config.discord.redirectUri)}&response_type=code&scope=identify&state=${encodeURIComponent(state)}`;
     res.redirect(url);
 });
 
 app.get('/auth/discord/callback', async (req, res) => {
     const code = req.query.code;
+    const state = req.query.state;
+    let targetRedirect = 'https://newerthforge.netlify.app';
+
+    if (state) {
+        try {
+            targetRedirect = Buffer.from(state, 'base64').toString('utf8');
+        } catch (e) {}
+    }
+
     if (!code) return res.status(400).send('No code provided');
 
     try {
@@ -312,16 +326,41 @@ app.get('/auth/discord/callback', async (req, res) => {
         // Generate JWT
         const token = jwt.sign({ discord_id: discordId, username, avatar_url: avatarUrl, role }, config.jwtSecret, { expiresIn: '30d' });
 
-        // Respond with HTML that sets the page title to the token. Electron will intercept this.
+        const separator = targetRedirect.includes('?') ? '&' : '?';
+        const finalUrl = `${targetRedirect}${separator}token=${encodeURIComponent(token)}`;
+
+        // Respond with HTML that sets page title and redirects back to site
         res.send(`
+            <!DOCTYPE html>
             <html>
                 <head>
+                    <meta charset="utf-8">
                     <title>AUTH_TOKEN:${token}</title>
+                    <style>
+                        body { background: #07040d; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; text-align: center; }
+                        .card { background: rgba(22, 11, 40, 0.95); border: 1px solid #f72585; border-radius: 16px; padding: 40px; box-shadow: 0 0 40px rgba(247, 37, 133, 0.4); max-width: 420px; }
+                        h2 { color: #f72585; margin-bottom: 10px; font-size: 1.6rem; }
+                        p { color: #9d4edd; font-size: 1rem; margin-bottom: 24px; }
+                    </style>
                 </head>
                 <body>
-                    <h2>Login successful! You can close this window.</h2>
+                    <div class="card">
+                        <h2>เข้าสู่ระบบสำเร็จ! 🎉</h2>
+                        <p>กำลังนำท่านกลับสู่เว็บไซต์ Newerth Forge...</p>
+                    </div>
                     <script>
-                        setTimeout(() => window.close(), 2000);
+                        if (window.opener && !window.opener.closed) {
+                            try {
+                                window.opener.postMessage({ type: 'DISCORD_AUTH_SUCCESS', token: "${token}" }, "*");
+                                window.close();
+                            } catch(e) {
+                                window.location.href = "${finalUrl}";
+                            }
+                        } else {
+                            setTimeout(() => {
+                                window.location.href = "${finalUrl}";
+                            }, 1000);
+                        }
                     </script>
                 </body>
             </html>
