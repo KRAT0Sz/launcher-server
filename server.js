@@ -329,38 +329,28 @@ app.get('/auth/discord/callback', async (req, res) => {
         const separator = targetRedirect.includes('?') ? '&' : '?';
         const finalUrl = `${targetRedirect}${separator}token=${encodeURIComponent(token)}`;
 
-        // Respond with HTML that sets page title and redirects back to site
+        // Instant 0-second redirect for web browser + title fallback for Electron launcher
         res.send(`
             <!DOCTYPE html>
             <html>
                 <head>
                     <meta charset="utf-8">
                     <title>AUTH_TOKEN:${token}</title>
-                    <style>
-                        body { background: #07040d; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; text-align: center; }
-                        .card { background: rgba(22, 11, 40, 0.95); border: 1px solid #f72585; border-radius: 16px; padding: 40px; box-shadow: 0 0 40px rgba(247, 37, 133, 0.4); max-width: 420px; }
-                        h2 { color: #f72585; margin-bottom: 10px; font-size: 1.6rem; }
-                        p { color: #9d4edd; font-size: 1rem; margin-bottom: 24px; }
-                    </style>
+                    <meta http-equiv="refresh" content="0;url=${finalUrl}">
                 </head>
-                <body>
-                    <div class="card">
-                        <h2>เข้าสู่ระบบสำเร็จ! 🎉</h2>
-                        <p>กำลังนำท่านกลับสู่เว็บไซต์ Newerth Forge...</p>
+                <body style="background: #07040d; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; text-align: center;">
+                    <div style="background: rgba(22, 11, 40, 0.95); border: 1px solid #f72585; border-radius: 16px; padding: 40px; box-shadow: 0 0 40px rgba(247, 37, 133, 0.4); max-width: 420px;">
+                        <h2 style="color: #f72585; margin-bottom: 10px;">เข้าสู่ระบบสำเร็จ! 🎉</h2>
+                        <p style="color: #9d4edd;">กำลังนำท่านกลับสู่เว็บไซต์ Newerth Forge...</p>
                     </div>
                     <script>
                         if (window.opener && !window.opener.closed) {
                             try {
                                 window.opener.postMessage({ type: 'DISCORD_AUTH_SUCCESS', token: "${token}" }, "*");
                                 window.close();
-                            } catch(e) {
-                                window.location.href = "${finalUrl}";
-                            }
-                        } else {
-                            setTimeout(() => {
-                                window.location.href = "${finalUrl}";
-                            }, 1000);
+                            } catch(e) {}
                         }
+                        window.location.replace("${finalUrl}");
                     </script>
                 </body>
             </html>
