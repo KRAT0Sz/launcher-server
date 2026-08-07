@@ -40,7 +40,7 @@ const config = {
         password: process.env.DB_PASSWORD || 'honforge',
     },
     adminToken: process.env.ADMIN_TOKEN || '',
-    allowedOrigins: (process.env.ALLOWED_ORIGINS || '*').split(','),
+    allowedOrigins: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : '*',
     githubToken: process.env.GITHUB_TOKEN || '',
     cacheTtlMs: parseInt(process.env.GITHUB_CACHE_MS || String(5 * 60 * 1000), 10),
     maxChatHistory: parseInt(process.env.MAX_CHAT_HISTORY || '50', 10),
