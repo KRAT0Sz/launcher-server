@@ -568,16 +568,91 @@ async function initDatabaseSchema() {
                 PRIMARY KEY (post_id, discord_id)
             );
 
-            CREATE TABLE IF NOT EXISTS post_replies (
-                reply_id SERIAL PRIMARY KEY,
-                post_id INT REFERENCES community_posts(post_id) ON DELETE CASCADE,
-                discord_id VARCHAR(255) REFERENCES users(discord_id) ON DELETE CASCADE,
-                username VARCHAR(255) NOT NULL,
-                avatar_url TEXT,
-                content TEXT NOT NULL,
+            CREATE TABLE IF NOT EXISTS store_products (
+                product_id SERIAL PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                developer VARCHAR(100) DEFAULT 'NTEAM',
+                category VARCHAR(100) DEFAULT 'Spoofer',
+                description TEXT,
+                icon_url TEXT,
+                banner_url TEXT,
+                download_url TEXT,
+                is_active BOOLEAN DEFAULT true
+            );
+
+            CREATE TABLE IF NOT EXISTS store_plans (
+                plan_id SERIAL PRIMARY KEY,
+                product_id INT REFERENCES store_products(product_id) ON DELETE CASCADE,
+                plan_type VARCHAR(50) NOT NULL,
+                name_th VARCHAR(255) NOT NULL,
+                price_thb NUMERIC(10,2) NOT NULL,
+                duration_days INT DEFAULT 1,
+                is_active BOOLEAN DEFAULT true
+            );
+
+            CREATE TABLE IF NOT EXISTS store_nteam_tokens_pool (
+                token_id SERIAL PRIMARY KEY,
+                product_id INT REFERENCES store_products(product_id) ON DELETE CASCADE,
+                plan_id INT REFERENCES store_plans(plan_id) ON DELETE CASCADE,
+                nteam_token VARCHAR(255) NOT NULL UNIQUE,
+                expires_at_nteam BIGINT,
+                is_used BOOLEAN DEFAULT false,
+                used_by_discord_id VARCHAR(255),
+                used_at BIGINT,
                 created_at BIGINT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS store_orders (
+                order_id VARCHAR(255) PRIMARY KEY,
+                discord_id VARCHAR(255) REFERENCES users(discord_id),
+                product_id INT REFERENCES store_products(product_id),
+                plan_id INT REFERENCES store_plans(plan_id),
+                amount NUMERIC(10,2) NOT NULL,
+                payment_status VARCHAR(50) DEFAULT 'PENDING',
+                delivered_nteam_token VARCHAR(255),
+                transaction_id VARCHAR(255),
+                created_at BIGINT NOT NULL,
+                paid_at BIGINT
+            );
         `);
+
+        // Seed SpoofKub Product if not exists
+        const { rows: prodCheck } = await query("SELECT product_id FROM store_products WHERE name = 'SpoofKub'");
+        if (prodCheck.length === 0) {
+            const { rows: newProd } = await query(`
+                INSERT INTO store_products (name, developer, category, description, icon_url, banner_url, download_url)
+                VALUES ('SpoofKub', 'NTEAM', 'Spoofer', 'โปรแกรม Spoofer ประสิทธิภาพสูงสำหรับการปลดล็อกและป้องกันฮาร์ดแวร์ พัฒนาโดย NTEAM ควบคุมด้วยระบบ Token ปลอดภัยสูง', 'https://cdn-icons-png.flaticon.com/512/2092/2092663.png', 'https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=1200', '')
+                RETURNING product_id
+            `);
+            const pId = newProd[0].product_id;
+            
+            // Seed 3 Plans: Daily (1 Day), Monthly (30 Days), Lifetime
+            await query(`
+                INSERT INTO store_plans (product_id, plan_type, name_th, price_thb, duration_days)
+                VALUES 
+                ($1, 'daily', 'สิทธิ์ใช้งาน 1 วัน (Daily)', 50.00, 1),
+                ($1, 'monthly', 'สิทธิ์ใช้งาน 30 วัน (Monthly)', 350.00, 30),
+                ($1, 'lifetime', 'สิทธิ์ใช้งานถาวร (Lifetime)', 1200.00, 0)
+            `, [pId]);
+
+            // Add sample test NTEAM tokens for each plan
+            const now = Date.now();
+            await query(`
+                INSERT INTO store_nteam_tokens_pool (product_id, plan_id, nteam_token, created_at)
+                SELECT $1, plan_id, 'NTEAM-SPOOFKUB-DAY-' || floor(random()*900000+100000)::text, $2
+                FROM store_plans WHERE product_id = $1 AND plan_type = 'daily'
+                UNION ALL
+                SELECT $1, plan_id, 'NTEAM-SPOOFKUB-MONTH-' || floor(random()*900000+100000)::text, $2
+                FROM store_plans WHERE product_id = $1 AND plan_type = 'monthly'
+                UNION ALL
+                SELECT $1, plan_id, 'NTEAM-SPOOFKUB-LIFE-' || floor(random()*900000+100000)::text, $2
+                FROM store_plans WHERE product_id = $1 AND plan_type = 'lifetime'
+                ON CONFLICT DO NOTHING
+            `, [pId, now]);
+            
+            console.log('Seeded SpoofKub product, plans, and initial test NTEAM tokens successfully.');
+        }
+
         console.log('Database tables verified/initialized successfully.');
     } catch (e) {
         console.error('Failed to init DB schema:', e.message);
@@ -1243,12 +1318,337 @@ async function loadEnvPromos() {
     }
 }
 
+// =====================================================
+// Store / Marketplace APIs (SpoofKub by NTEAM)
+// =====================================================
+
+// Get Products and Plans with Stock Counts
+app.get('/api/store/products', async (req, res) => {
+    try {
+        const { rows: products } = await query('SELECT * FROM store_products WHERE is_active = true ORDER BY product_id ASC');
+        for (const prod of products) {
+            const { rows: plans } = await query('SELECT * FROM store_plans WHERE product_id = $1 AND is_active = true ORDER BY plan_id ASC', [prod.product_id]);
+            for (const plan of plans) {
+                const { rows: stock } = await query('SELECT COUNT(*)::int as count FROM store_nteam_tokens_pool WHERE product_id = $1 AND plan_id = $2 AND is_used = false', [prod.product_id, plan.plan_id]);
+                plan.stock_count = stock[0].count;
+            }
+            prod.plans = plans;
+        }
+        res.json({ success: true, products });
+    } catch (e) {
+        console.error('Error fetching store products:', e);
+        res.status(500).json({ error: 'Failed to fetch store products' });
+    }
+});
+
+// Create Order
+app.post('/api/store/orders/create', authenticateToken, async (req, res) => {
+    const discord_id = req.user.discord_id;
+    const { product_id, plan_id } = req.body;
+
+    if (!product_id || !plan_id) {
+        return res.status(400).json({ error: 'Missing product_id or plan_id' });
+    }
+
+    try {
+        const { rows: planRows } = await query('SELECT * FROM store_plans WHERE plan_id = $1 AND product_id = $2 AND is_active = true', [plan_id, product_id]);
+        if (planRows.length === 0) return res.status(404).json({ error: 'Plan not found' });
+        const plan = planRows[0];
+
+        // Check stock
+        const { rows: stockRows } = await query('SELECT COUNT(*)::int as count FROM store_nteam_tokens_pool WHERE product_id = $1 AND plan_id = $2 AND is_used = false', [product_id, plan_id]);
+        if (stockRows[0].count <= 0) {
+            return res.status(400).json({ error: 'สินค้าในคลังสำหรับแพ็กเกจนี้หมดชั่วคราว (Out of Stock)' });
+        }
+
+        const { rows: prodRows } = await query('SELECT * FROM store_products WHERE product_id = $1', [product_id]);
+        const product = prodRows[0];
+
+        const orderId = 'ORD-' + Date.now().toString(36).toUpperCase() + '-' + Math.floor(Math.random()*1000).toString().padStart(3, '0');
+        const now = Date.now();
+
+        await query(`
+            INSERT INTO store_orders (order_id, discord_id, product_id, plan_id, amount, payment_status, created_at)
+            VALUES ($1, $2, $3, $4, $5, 'PENDING', $6)
+        `, [orderId, discord_id, product_id, plan_id, plan.price_thb, now]);
+
+        res.json({
+            success: true,
+            order: {
+                order_id: orderId,
+                product_name: product.name,
+                developer: product.developer,
+                plan_name: plan.name_th,
+                amount: plan.price_thb,
+                payment_status: 'PENDING',
+                created_at: now
+            }
+        });
+    } catch (e) {
+        console.error('Error creating order:', e);
+        res.status(500).json({ error: 'Failed to create order' });
+    }
+});
+
+// Check Order Status
+app.get('/api/store/orders/:orderId', authenticateToken, async (req, res) => {
+    const discord_id = req.user.discord_id;
+    const orderId = req.params.orderId;
+
+    try {
+        const { rows } = await query(`
+            SELECT o.*, p.name as product_name, p.developer, pl.name_th as plan_name, p.download_url
+            FROM store_orders o
+            JOIN store_products p ON o.product_id = p.product_id
+            JOIN store_plans pl ON o.plan_id = pl.plan_id
+            WHERE o.order_id = $1 AND o.discord_id = $2
+        `, [orderId, discord_id]);
+
+        if (rows.length === 0) return res.status(404).json({ error: 'Order not found' });
+        res.json({ success: true, order: rows[0] });
+    } catch (e) {
+        console.error('Error fetching order status:', e);
+        res.status(500).json({ error: 'Failed to fetch order status' });
+    }
+});
+
+// Simulate Payment / Process Payment Completion (Fulfills order with NTEAM Token)
+app.post('/api/store/orders/:orderId/simulate-payment', authenticateToken, async (req, res) => {
+    const discord_id = req.user.discord_id;
+    const orderId = req.params.orderId;
+
+    try {
+        const { rows: orderRows } = await query('SELECT * FROM store_orders WHERE order_id = $1 AND discord_id = $2', [orderId, discord_id]);
+        if (orderRows.length === 0) return res.status(404).json({ error: 'Order not found' });
+
+        const order = orderRows[0];
+        if (order.payment_status === 'PAID') {
+            return res.json({ success: true, message: 'คำสั่งซื้อนี้ชำระเงินเรียบร้อยแล้ว', order });
+        }
+
+        // Allocate 1 NTEAM token from pool
+        const now = Date.now();
+        const { rows: tokenRows } = await query(`
+            SELECT * FROM store_nteam_tokens_pool 
+            WHERE product_id = $1 AND plan_id = $2 AND is_used = false 
+            ORDER BY token_id ASC LIMIT 1
+        `, [order.product_id, order.plan_id]);
+
+        let tokenToDeliver = '';
+        if (tokenRows.length > 0) {
+            const poolToken = tokenRows[0];
+            tokenToDeliver = poolToken.nteam_token;
+            await query(`
+                UPDATE store_nteam_tokens_pool 
+                SET is_used = true, used_by_discord_id = $1, used_at = $2 
+                WHERE token_id = $3
+            `, [discord_id, now, poolToken.token_id]);
+        } else {
+            // Fallback auto-generate if pool ran dry during test
+            tokenToDeliver = `NTEAM-SPOOFKUB-AUTO-${Date.now().toString(36).toUpperCase()}`;
+        }
+
+        await query(`
+            UPDATE store_orders 
+            SET payment_status = 'PAID', delivered_nteam_token = $1, paid_at = $2, transaction_id = $3
+            WHERE order_id = $4
+        `, [tokenToDeliver, now, 'TXN-' + now, orderId]);
+
+        const { rows: updatedOrder } = await query(`
+            SELECT o.*, p.name as product_name, p.developer, pl.name_th as plan_name, p.download_url
+            FROM store_orders o
+            JOIN store_products p ON o.product_id = p.product_id
+            JOIN store_plans pl ON o.plan_id = pl.plan_id
+            WHERE o.order_id = $1
+        `, [orderId]);
+
+        res.json({
+            success: true,
+            message: 'ชำระเงินสำเร็จ! ระบบมอบ NTEAM Token ให้เรียบร้อยแล้ว',
+            order: updatedOrder[0]
+        });
+    } catch (e) {
+        console.error('Error processing payment simulation:', e);
+        res.status(500).json({ error: 'Failed to process payment' });
+    }
+});
+
+// Get User's Purchased Tokens & Inventory
+app.get('/api/store/my-tokens', authenticateToken, async (req, res) => {
+    const discord_id = req.user.discord_id;
+    try {
+        const { rows } = await query(`
+            SELECT o.order_id, o.delivered_nteam_token, o.amount, o.paid_at, o.payment_status,
+                   p.name as product_name, p.developer, p.category, p.icon_url, p.download_url,
+                   pl.name_th as plan_name, pl.plan_type, pl.duration_days
+            FROM store_orders o
+            JOIN store_products p ON o.product_id = p.product_id
+            JOIN store_plans pl ON o.plan_id = pl.plan_id
+            WHERE o.discord_id = $1 AND o.payment_status = 'PAID'
+            ORDER BY o.paid_at DESC
+        `, [discord_id]);
+
+        res.json({ success: true, tokens: rows });
+    } catch (e) {
+        console.error('Error fetching my tokens:', e);
+        res.status(500).json({ error: 'Failed to fetch tokens' });
+    }
+});
+
+// Admin API: Import NTEAM Tokens to Stock Pool
+app.post('/api/store/admin/import-tokens', async (req, res) => {
+    const token = req.headers['x-admin-token'];
+    if (!config.adminToken || token !== config.adminToken) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { product_id, plan_id, tokens } = req.body;
+    if (!product_id || !plan_id || !Array.isArray(tokens) || tokens.length === 0) {
+        return res.status(400).json({ error: 'Invalid payload. Expect product_id, plan_id, and tokens array' });
+    }
+
+    try {
+        let addedCount = 0;
+        const now = Date.now();
+        for (const t of tokens) {
+            const cleanToken = String(t).trim();
+            if (!cleanToken) continue;
+            const res = await query(`
+                INSERT INTO store_nteam_tokens_pool (product_id, plan_id, nteam_token, created_at)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (nteam_token) DO NOTHING
+            `, [product_id, plan_id, cleanToken, now]);
+            if (res.rowCount > 0) addedCount++;
+        }
+        res.json({ success: true, message: `Successfully added ${addedCount} NTEAM tokens to stock pool.` });
+    } catch (e) {
+        console.error('Error importing tokens:', e);
+        res.status(500).json({ error: 'Failed to import tokens' });
+    }
+});
+
+async function loadEnvStoreData() {
+    try {
+        // 1. Update SpoofKub Product details from Environment Variables if specified
+        const downloadUrl = process.env.SPOOFKUB_DOWNLOAD_URL || process.env.STORE_SPOOFKUB_URL;
+        const devName = process.env.SPOOFKUB_DEV_NAME || process.env.STORE_DEV_NAME;
+        if (downloadUrl || devName) {
+            if (downloadUrl && devName) {
+                await query("UPDATE store_products SET download_url = $1, developer = $2 WHERE name = 'SpoofKub'", [downloadUrl, devName]);
+            } else if (downloadUrl) {
+                await query("UPDATE store_products SET download_url = $1 WHERE name = 'SpoofKub'", [downloadUrl]);
+            } else if (devName) {
+                await query("UPDATE store_products SET developer = $1 WHERE name = 'SpoofKub'", [devName]);
+            }
+            console.log('[STORE-ENV] Updated SpoofKub product details from env.');
+        }
+
+        // 2. Helper to import tokens for a plan_type from comma-separated env string
+        const importEnvTokensForPlan = async (planType, envValue) => {
+            if (!envValue) return;
+            const tokens = envValue.split(',').map(t => t.trim()).filter(Boolean);
+            if (tokens.length === 0) return;
+
+            const { rows: planRows } = await query(`
+                SELECT pl.plan_id, pl.product_id 
+                FROM store_plans pl 
+                JOIN store_products pr ON pl.product_id = pr.product_id 
+                WHERE pr.name = 'SpoofKub' AND pl.plan_type = $1
+            `, [planType]);
+
+            if (planRows.length === 0) return;
+            const { plan_id, product_id } = planRows[0];
+
+            let count = 0;
+            const now = Date.now();
+            for (const tok of tokens) {
+                const res = await query(`
+                    INSERT INTO store_nteam_tokens_pool (product_id, plan_id, nteam_token, created_at)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (nteam_token) DO NOTHING
+                `, [product_id, plan_id, tok, now]);
+                if (res.rowCount > 0) count++;
+            }
+            if (count > 0) {
+                console.log(`[STORE-ENV] Loaded ${count} NTEAM tokens for plan '${planType}' from environment variables.`);
+            }
+        };
+
+        await importEnvTokensForPlan('daily', process.env.NTEAM_TOKENS_DAILY);
+        await importEnvTokensForPlan('monthly', process.env.NTEAM_TOKENS_MONTHLY);
+        await importEnvTokensForPlan('lifetime', process.env.NTEAM_TOKENS_LIFETIME);
+
+        // 3. Import from combined NTEAM_TOKENS / STORE_TOKENS env variable
+        // Format: daily:TOKEN1,daily:TOKEN2,monthly:TOKEN3,lifetime:TOKEN4
+        const rawTokens = process.env.NTEAM_TOKENS || process.env.STORE_TOKENS;
+        if (rawTokens) {
+            const pairs = rawTokens.split(',').map(s => s.trim()).filter(Boolean);
+            for (const pair of pairs) {
+                const parts = pair.split(':');
+                if (parts.length >= 2) {
+                    const planType = parts[0].trim().toLowerCase();
+                    const tok = parts.slice(1).join(':').trim();
+                    if (planType && tok) {
+                        await importEnvTokensForPlan(planType, tok);
+                    }
+                }
+            }
+        }
+
+        // 4. Import custom products JSON if passed via STORE_PRODUCTS_JSON
+        const productsJson = process.env.STORE_PRODUCTS_JSON;
+        if (productsJson) {
+            try {
+                const prods = JSON.parse(productsJson);
+                if (Array.isArray(prods)) {
+                    for (const p of prods) {
+                        if (!p.name) continue;
+                        const { rows: exist } = await query('SELECT product_id FROM store_products WHERE name = $1', [p.name]);
+                        let pId;
+                        if (exist.length > 0) {
+                            pId = exist[0].product_id;
+                            await query(`
+                                UPDATE store_products 
+                                SET developer = COALESCE($1, developer), category = COALESCE($2, category),
+                                    description = COALESCE($3, description), icon_url = COALESCE($4, icon_url),
+                                    banner_url = COALESCE($5, banner_url), download_url = COALESCE($6, download_url)
+                                WHERE product_id = $7
+                            `, [p.developer, p.category, p.description, p.icon_url, p.banner_url, p.download_url, pId]);
+                        } else {
+                            const { rows: newP } = await query(`
+                                INSERT INTO store_products (name, developer, category, description, icon_url, banner_url, download_url)
+                                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                RETURNING product_id
+                            `, [p.name, p.developer || 'NTEAM', p.category || 'Spoofer', p.description || '', p.icon_url || '', p.banner_url || '', p.download_url || '']);
+                            pId = newP[0].product_id;
+                        }
+
+                        if (Array.isArray(p.plans)) {
+                            for (const plan of p.plans) {
+                                await query(`
+                                    INSERT INTO store_plans (product_id, plan_type, name_th, price_thb, duration_days)
+                                    VALUES ($1, $2, $3, $4, $5)
+                                    ON CONFLICT DO NOTHING
+                                `, [pId, plan.plan_type, plan.name_th, plan.price_thb, plan.duration_days || 0]);
+                            }
+                        }
+                    }
+                    console.log('[STORE-ENV] Loaded custom products JSON from env.');
+                }
+            } catch (e) {
+                console.error('[STORE-ENV] Error parsing STORE_PRODUCTS_JSON:', e.message);
+            }
+        }
+    } catch (e) {
+        console.error('[STORE-ENV] Error loading store env data:', e.message);
+    }
+}
+
 async function start() {
     try {
         await query('SELECT 1');
         console.log('[DB] Connected to PostgreSQL');
         await runInitSql();
         await loadEnvPromos();
+        await loadEnvStoreData();
         await refreshVipCache();
         server.listen(config.port, () => {
             console.log(`Server listening on port ${config.port} (${config.nodeEnv})`);
