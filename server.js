@@ -587,9 +587,26 @@ async function initDatabaseSchema() {
                 name_th VARCHAR(255) NOT NULL,
                 price_thb NUMERIC(10,2) NOT NULL,
                 duration_days INT DEFAULT 1,
-                is_active BOOLEAN DEFAULT true
+                is_active BOOLEAN DEFAULT true,
+                UNIQUE(product_id, plan_type)
             );
+        `);
 
+        // Clean up any duplicate plans and add UNIQUE constraint if missing
+        try {
+            await query(`
+                DELETE FROM store_plans a USING store_plans b
+                WHERE a.plan_id > b.plan_id 
+                  AND a.product_id = b.product_id 
+                  AND a.plan_type = b.plan_type;
+
+                ALTER TABLE store_plans ADD CONSTRAINT store_plans_product_plan_unique UNIQUE (product_id, plan_type);
+            `);
+        } catch (e) {
+            // Constraint may already exist
+        }
+
+        await query(`
             CREATE TABLE IF NOT EXISTS store_nteam_tokens_pool (
                 token_id SERIAL PRIMARY KEY,
                 product_id INT REFERENCES store_products(product_id) ON DELETE CASCADE,
@@ -633,6 +650,10 @@ async function initDatabaseSchema() {
                 ($1, 'daily', 'สิทธิ์ใช้งาน 1 วัน (Daily)', 50.00, 1),
                 ($1, 'monthly', 'สิทธิ์ใช้งาน 30 วัน (Monthly)', 350.00, 30),
                 ($1, 'lifetime', 'สิทธิ์ใช้งานถาวร (Lifetime)', 1200.00, 0)
+                ON CONFLICT (product_id, plan_type) DO UPDATE SET
+                name_th = EXCLUDED.name_th,
+                price_thb = EXCLUDED.price_thb,
+                duration_days = EXCLUDED.duration_days;
             `, [pId]);
 
             // Add sample test NTEAM tokens for each plan
@@ -1626,7 +1647,8 @@ async function loadEnvStoreData() {
                                 await query(`
                                     INSERT INTO store_plans (product_id, plan_type, name_th, price_thb, duration_days)
                                     VALUES ($1, $2, $3, $4, $5)
-                                    ON CONFLICT DO NOTHING
+                                    ON CONFLICT (product_id, plan_type) 
+                                    DO UPDATE SET name_th = EXCLUDED.name_th, price_thb = EXCLUDED.price_thb, duration_days = EXCLUDED.duration_days
                                 `, [pId, plan.plan_type, plan.name_th, plan.price_thb, plan.duration_days || 0]);
                             }
                         }
