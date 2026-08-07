@@ -1475,6 +1475,13 @@ app.post('/api/store/orders/:orderId/simulate-payment', authenticateToken, async
             WHERE order_id = $4
         `, [tokenToDeliver, now, 'TXN-' + now, orderId]);
 
+        // Award points equal to purchase amount (1 THB = 1 Point)
+        const pointsEarned = Math.floor(parseFloat(order.amount));
+        if (pointsEarned > 0) {
+            await query('UPDATE users SET points = points + $1 WHERE discord_id = $2', [pointsEarned, discord_id]);
+            await query('INSERT INTO point_logs (discord_id, points_change, reason, created_at) VALUES ($1, $2, $3, $4)', [discord_id, pointsEarned, `Store Purchase: ${orderId}`, now]);
+        }
+
         const { rows: updatedOrder } = await query(`
             SELECT o.*, p.name as product_name, p.developer, pl.name_th as plan_name, p.download_url
             FROM store_orders o
@@ -1485,7 +1492,8 @@ app.post('/api/store/orders/:orderId/simulate-payment', authenticateToken, async
 
         res.json({
             success: true,
-            message: 'ชำระเงินสำเร็จ! ระบบมอบ NTEAM Token ให้เรียบร้อยแล้ว',
+            message: `ชำระเงินสำเร็จ! คุณได้รับ ${pointsEarned} แต้มสะสม และระบบมอบ NTEAM Token ให้เรียบร้อยแล้ว`,
+            points_earned: pointsEarned,
             order: updatedOrder[0]
         });
     } catch (e) {
