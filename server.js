@@ -11,6 +11,28 @@ const fs = require('fs');
 const axios = require('axios');
 const jwt = require('jsonwebtoken');
 
+// Load local .env if present (Render supplies env vars directly via process.env)
+try {
+    const envFile = path.join(__dirname, '.env');
+    if (fs.existsSync(envFile)) {
+        const lines = fs.readFileSync(envFile, 'utf8').split(/\r?\n/);
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed && !trimmed.startsWith('#') && trimmed.includes('=')) {
+                const idx = trimmed.indexOf('=');
+                const key = trimmed.slice(0, idx).trim();
+                let val = trimmed.slice(idx + 1).trim();
+                if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+                    val = val.slice(1, -1);
+                }
+                if (key && process.env[key] === undefined) {
+                    process.env[key] = val;
+                }
+            }
+        }
+    }
+} catch (e) { }
+
 // Helper: get start of today in Thailand timezone (UTC+7)
 function getStartOfDayTH() {
     const now = new Date();
@@ -26,6 +48,15 @@ function getStartOfDayTH() {
 // =====================================================
 // Environment configuration
 // =====================================================
+let discordConfigFromEnv = {};
+if (process.env.DISCORD_CONFIG_JSON) {
+    try {
+        discordConfigFromEnv = JSON.parse(process.env.DISCORD_CONFIG_JSON);
+    } catch (e) {
+        console.error('[CONFIG] Failed to parse DISCORD_CONFIG_JSON:', e.message);
+    }
+}
+
 const config = {
     port: parseInt(process.env.PORT || '3000', 10),
     nodeEnv: process.env.NODE_ENV || 'development',
@@ -49,6 +80,11 @@ const config = {
         clientId: process.env.DISCORD_CLIENT_ID || '',
         clientSecret: process.env.DISCORD_CLIENT_SECRET || '',
         redirectUri: process.env.DISCORD_REDIRECT_URI || (process.env.NODE_ENV === 'production' ? 'https://launcher-counter.onrender.com/auth/discord/callback' : 'http://localhost:3000/auth/discord/callback'),
+        guildId: process.env.DISCORD_GUILD_ID || (discordConfigFromEnv && discordConfigFromEnv.guildId) || '532595467880628235',
+        channelId: process.env.DISCORD_CHANNEL_ID || (discordConfigFromEnv && discordConfigFromEnv.channelId) || '533931239741325322',
+        communityChannelId: process.env.DISCORD_COMMUNITY_CHANNEL_ID || (discordConfigFromEnv && discordConfigFromEnv.communityChannelId) || '1446015651796746270',
+        communityWebhookUrl: process.env.DISCORD_COMMUNITY_WEBHOOK_URL || (discordConfigFromEnv && discordConfigFromEnv.communityWebhookUrl) || '',
+        botToken: process.env.DISCORD_BOT_TOKEN || (discordConfigFromEnv && discordConfigFromEnv.botToken) || '',
     },
     jwtSecret: process.env.JWT_SECRET || 'honforge-super-secret-key-change-in-prod',
     roles: {
@@ -257,6 +293,384 @@ app.get('/github-releases', async (req, res) => {
         if (githubCache.data) return res.json(githubCache.data);
         res.status(500).json({ error: 'Failed to fetch from GitHub' });
     }
+});
+
+// =====================================================
+// Discord Announcements & Community Chat Proxy
+// =====================================================
+let cachedDiscordAnnouncements = null;
+let lastDiscordAnnouncementsFetch = 0;
+const DISCORD_ANNOUNCEMENTS_CACHE_MS = 60 * 1000;
+
+let cachedCommunityMessages = null;
+let lastCommunityMessagesFetch = 0;
+const DISCORD_COMMUNITY_CACHE_MS = 3 * 1000;
+
+// Public Discord status / IDs (non-sensitive)
+app.get('/api/discord/config', (req, res) => {
+    res.json({
+        success: true,
+        guildId: config.discord.guildId,
+        channelId: config.discord.channelId,
+        communityChannelId: config.discord.communityChannelId,
+        hasBotToken: Boolean(config.discord.botToken),
+        hasWebhook: Boolean(config.discord.communityWebhookUrl)
+    });
+});
+
+// Discord Announcements (Forum threads or channel messages)
+app.get('/api/discord/announcements', async (req, res) => {
+    const now = Date.now();
+    if (cachedDiscordAnnouncements && (now - lastDiscordAnnouncementsFetch < DISCORD_ANNOUNCEMENTS_CACHE_MS)) {
+        return res.json(cachedDiscordAnnouncements);
+    }
+
+    const { guildId, channelId, botToken } = config.discord;
+
+    let botClientId = '1529842396370698290';
+    try {
+        if (botToken && botToken.includes('.')) {
+            botClientId = Buffer.from(botToken.split('.')[0], 'base64').toString();
+        }
+    } catch (e) { }
+    const inviteUrl = `https://discord.com/oauth2/authorize?client_id=${botClientId}&scope=bot&permissions=66560`;
+
+    if (!botToken) {
+        return res.json({
+            success: false,
+            error: 'MISSING_BOT_TOKEN',
+            guildId,
+            channelId,
+            inviteUrl
+        });
+    }
+
+    try {
+        const headers = {
+            'Authorization': `Bot ${botToken}`,
+            'User-Agent': 'DiscordBot (https://newerthforge.com, 2.0.0)'
+        };
+
+        const channelRes = await axios.get(`https://discord.com/api/v10/channels/${channelId}`, {
+            headers,
+            timeout: 8000
+        });
+        const channelInfo = channelRes.data;
+
+        let parsedMessages = [];
+
+        if (channelInfo && channelInfo.type === 15) {
+            // Discord Forum Channel -> Fetch Threads
+            const tagMap = {};
+            if (Array.isArray(channelInfo.available_tags)) {
+                channelInfo.available_tags.forEach(t => { tagMap[t.id] = t.name; });
+            }
+
+            const [activeRes, archivedRes] = await Promise.all([
+                axios.get(`https://discord.com/api/v10/guilds/${guildId}/threads/active`, { headers, timeout: 8000 }).catch(() => ({ data: {} })),
+                axios.get(`https://discord.com/api/v10/channels/${channelId}/threads/archived/public?limit=10`, { headers, timeout: 8000 }).catch(() => ({ data: {} }))
+            ]);
+
+            const activeThreads = (activeRes.data.threads || []).filter(t => t.parent_id === channelId);
+            const archivedThreads = (archivedRes.data.threads || []).filter(t => t.parent_id === channelId);
+            const allThreads = [...activeThreads, ...archivedThreads];
+            allThreads.sort((a, b) => (BigInt(b.id) > BigInt(a.id) ? 1 : -1));
+
+            const topThreads = allThreads.slice(0, 2);
+
+            for (const thread of topThreads) {
+                let author = null;
+                let imageUrl = null;
+                let description = '';
+
+                try {
+                    const msgRes = await axios.get(`https://discord.com/api/v10/channels/${thread.id}/messages/${thread.id}`, { headers, timeout: 5000 });
+                    const msg = msgRes.data;
+                    if (msg && msg.author) {
+                        author = {
+                            id: msg.author.id,
+                            username: msg.author.global_name || msg.author.username,
+                            avatar: msg.author.avatar ? `https://cdn.discordapp.com/avatars/${msg.author.id}/${msg.author.avatar}.png` : null
+                        };
+                    }
+                    if (msg && Array.isArray(msg.attachments) && msg.attachments.length > 0) {
+                        const img = msg.attachments.find(a => (a.content_type && a.content_type.startsWith('image/')) || /\.(jpg|jpeg|png|webp|gif)$/i.test(a.url || ''));
+                        if (img) imageUrl = img.url;
+                    }
+                    if (!imageUrl && msg && Array.isArray(msg.embeds)) {
+                        for (const emb of msg.embeds) {
+                            if (emb.image?.url) { imageUrl = emb.image.url; break; }
+                            if (emb.thumbnail?.url) { imageUrl = emb.thumbnail.url; break; }
+                        }
+                    }
+                    if (msg && msg.content) {
+                        description = msg.content;
+                    }
+                } catch (err) { }
+
+                const tags = (thread.applied_tags || []).map(id => tagMap[id]).filter(Boolean);
+
+                parsedMessages.push({
+                    id: thread.id,
+                    title: thread.name.replace(/[*_~`]/g, ''),
+                    description: description.replace(/[*_~`]/g, '') || tags.join(' • ') || 'อัปเดตม็อดใหม่',
+                    tags,
+                    author: author || { id: thread.owner_id, username: 'ผู้ดูแลระบบ', avatar: null },
+                    timestamp: thread.thread_metadata?.create_timestamp || null,
+                    imageUrl,
+                    url: `https://discord.com/channels/${guildId}/${thread.id}`
+                });
+            }
+        } else {
+            // Standard Text Channel
+            const response = await axios.get(`https://discord.com/api/v10/channels/${channelId}/messages?limit=2`, {
+                headers,
+                timeout: 8000
+            });
+
+            if (Array.isArray(response.data)) {
+                parsedMessages = response.data.map(msg => {
+                    let imageUrl = null;
+                    if (Array.isArray(msg.attachments)) {
+                        const imgAtt = msg.attachments.find(a =>
+                            (a.content_type && a.content_type.startsWith('image/')) ||
+                            /\.(jpg|jpeg|png|webp|gif)/i.test(a.url || '')
+                        );
+                        if (imgAtt) imageUrl = imgAtt.url;
+                    }
+                    if (!imageUrl && Array.isArray(msg.embeds)) {
+                        for (const emb of msg.embeds) {
+                            if (emb.image && emb.image.url) {
+                                imageUrl = emb.image.url;
+                                break;
+                            } else if (emb.thumbnail && emb.thumbnail.url) {
+                                imageUrl = emb.thumbnail.url;
+                                break;
+                            }
+                        }
+                    }
+
+                    let title = '';
+                    let description = '';
+                    const rawContent = (msg.content || '').trim();
+                    if (rawContent) {
+                        const lines = rawContent.split('\n').map(l => l.trim()).filter(Boolean);
+                        title = lines[0] || (channelInfo?.name ? `ประกาศ ${channelInfo.name}` : 'ประกาศจาก Discord');
+                        description = lines.length > 1 ? lines.slice(1).join('\n') : rawContent;
+                    } else if (msg.embeds && msg.embeds.length > 0 && msg.embeds[0].title) {
+                        title = msg.embeds[0].title;
+                        description = msg.embeds[0].description || '';
+                    } else {
+                        title = channelInfo?.name ? `ประกาศ ${channelInfo.name}` : 'ประกาศจาก Discord';
+                        description = msg.author?.username ? `โพสต์โดย ${msg.author.username}` : 'คลิกเพื่อดูรายละเอียดใน Discord';
+                    }
+
+                    return {
+                        id: msg.id,
+                        title: title.replace(/^[#\s*~`_>]+/g, '').replace(/[*_~`#]/g, '').trim(),
+                        description: description.replace(/^[#\s*~`_>]+/g, '').replace(/[*_~`#]/g, '').trim(),
+                        fullContent: msg.content || description || '',
+                        author: msg.author ? {
+                            id: msg.author.id,
+                            username: msg.author.global_name || msg.author.username,
+                            avatar: msg.author.avatar ? `https://cdn.discordapp.com/avatars/${msg.author.id}/${msg.author.avatar}.png` : null
+                        } : null,
+                        timestamp: msg.timestamp,
+                        imageUrl,
+                        url: `https://discord.com/channels/${guildId}/${channelId}/${msg.id}`
+                    };
+                });
+            }
+        }
+
+        cachedDiscordAnnouncements = {
+            success: true,
+            guildId,
+            channelId,
+            channelName: channelInfo?.name,
+            messages: parsedMessages
+        };
+        lastDiscordAnnouncementsFetch = now;
+        res.json(cachedDiscordAnnouncements);
+    } catch (e) {
+        console.error('Failed to fetch Discord channel messages:', e.response?.data || e.message);
+        if (cachedDiscordAnnouncements) {
+            return res.json(cachedDiscordAnnouncements);
+        }
+        res.status(e.response?.status || 500).json({
+            success: false,
+            error: e.response?.status === 401 ? 'UNAUTHORIZED' : (e.response?.data?.message || e.message),
+            statusCode: e.response?.status,
+            guildId,
+            channelId,
+            inviteUrl
+        });
+    }
+});
+
+// Community Chat Messages
+app.get('/api/discord/community/messages', async (req, res) => {
+    const now = Date.now();
+    if (cachedCommunityMessages && (now - lastCommunityMessagesFetch < DISCORD_COMMUNITY_CACHE_MS)) {
+        return res.json(cachedCommunityMessages);
+    }
+
+    const { guildId, communityChannelId, botToken } = config.discord;
+
+    if (!botToken) {
+        return res.json({ success: false, error: 'MISSING_BOT_TOKEN' });
+    }
+
+    try {
+        const headers = {
+            'Authorization': `Bot ${botToken}`,
+            'User-Agent': 'DiscordBot (https://newerthforge.com, 2.0.0)'
+        };
+
+        const response = await axios.get(`https://discord.com/api/v10/channels/${communityChannelId}/messages?limit=50`, {
+            headers,
+            timeout: 8000
+        });
+
+        if (!Array.isArray(response.data)) {
+            return res.json({ success: true, messages: [] });
+        }
+
+        const parsedMessages = response.data.map(msg => {
+            let imageUrl = null;
+            if (Array.isArray(msg.attachments)) {
+                const img = msg.attachments.find(a =>
+                    (a.content_type && a.content_type.startsWith('image/')) ||
+                    /\.(jpg|jpeg|png|webp|gif)$/i.test(a.url || '')
+                );
+                if (img) imageUrl = img.url;
+            }
+            if (!imageUrl && Array.isArray(msg.embeds)) {
+                for (const emb of msg.embeds) {
+                    if (emb.image?.url) { imageUrl = emb.image.url; break; }
+                    if (emb.thumbnail?.url) { imageUrl = emb.thumbnail.url; break; }
+                }
+            }
+
+            const rawContent = (msg.content || '').trim();
+            const isWebhook = !!msg.webhook_id;
+            let displayAuthor = msg.author?.global_name || msg.author?.username || 'Discord User';
+            let displayContent = rawContent;
+            let viaLauncher = isWebhook;
+
+            const launcherMatch = rawContent.match(/^💬 \*\*\[(.*?)\]\*\*:\s*([\s\S]*)$/);
+            if (launcherMatch) {
+                displayAuthor = launcherMatch[1];
+                displayContent = launcherMatch[2];
+                viaLauncher = true;
+            }
+
+            let avatar = 'https://cdn.discordapp.com/embed/avatars/0.png';
+            if (msg.author?.avatar) {
+                avatar = `https://cdn.discordapp.com/avatars/${msg.author.id}/${msg.author.avatar}.png`;
+            } else if (viaLauncher) {
+                avatar = 'https://avatars.githubusercontent.com/u/155028748?v=4';
+            }
+
+            return {
+                id: msg.id,
+                content: displayContent,
+                rawContent: rawContent,
+                author: {
+                    id: msg.author?.id,
+                    username: displayAuthor,
+                    avatar: avatar,
+                    isBot: !!msg.author?.bot,
+                    viaLauncher
+                },
+                timestamp: msg.timestamp,
+                imageUrl,
+                url: `https://discord.com/channels/${guildId}/${communityChannelId}/${msg.id}`
+            };
+        });
+
+        cachedCommunityMessages = {
+            success: true,
+            guildId,
+            channelId: communityChannelId,
+            messages: parsedMessages
+        };
+        lastCommunityMessagesFetch = now;
+        res.json(cachedCommunityMessages);
+    } catch (e) {
+        console.error('Failed to get community messages:', e.response?.data || e.message);
+        if (cachedCommunityMessages) {
+            return res.json(cachedCommunityMessages);
+        }
+        res.status(e.response?.status || 500).json({
+            success: false,
+            error: e.response?.data?.message || e.message
+        });
+    }
+});
+
+// Send Community Chat Message
+app.post('/api/discord/community/messages', async (req, res) => {
+    const { senderName, content, avatarUrl } = req.body;
+    const { communityChannelId, communityWebhookUrl, botToken } = config.discord;
+
+    const trimmed = (content || '').trim();
+    if (!trimmed) {
+        return res.status(400).json({ success: false, error: 'EMPTY_CONTENT' });
+    }
+
+    const cleanSender = (senderName || 'ผู้เล่นทั่วไป').trim().replace(/[*_~`]/g, '').slice(0, 32);
+    const cleanAvatar = avatarUrl || 'https://avatars.githubusercontent.com/u/155028748?v=4';
+
+    if (communityWebhookUrl) {
+        try {
+            const webhookRes = await axios.post(communityWebhookUrl, {
+                username: cleanSender,
+                avatar_url: cleanAvatar,
+                content: trimmed
+            }, {
+                headers: { 'Content-Type': 'application/json' },
+                timeout: 10000
+            });
+            cachedCommunityMessages = null;
+            return res.json({
+                success: true,
+                messageId: webhookRes.data?.id,
+                viaWebhook: true
+            });
+        } catch (e) {
+            console.warn('Webhook failed, falling back to bot message:', e.message);
+        }
+    }
+
+    if (botToken && communityChannelId) {
+        try {
+            const botMsg = await axios.post(`https://discord.com/api/v10/channels/${communityChannelId}/messages`, {
+                content: `💬 **[${cleanSender}]**: ${trimmed}`
+            }, {
+                headers: {
+                    'Authorization': `Bot ${botToken}`,
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'DiscordBot (https://newerthforge.com, 2.0.0)'
+                },
+                timeout: 10000
+            });
+            cachedCommunityMessages = null;
+            return res.json({
+                success: true,
+                messageId: botMsg.data?.id,
+                viaBot: true
+            });
+        } catch (e) {
+            console.error('Bot fallback failed:', e.response?.data || e.message);
+            return res.status(500).json({
+                success: false,
+                error: e.response?.data?.message || e.message
+            });
+        }
+    }
+
+    return res.status(500).json({ success: false, error: 'NO_WEBHOOK_OR_BOT_TOKEN' });
 });
 
 // =====================================================
