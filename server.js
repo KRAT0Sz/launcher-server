@@ -199,6 +199,7 @@ async function getStats() {
 // Express app
 // =====================================================
 const app = express();
+app.set('trust proxy', 1);
 app.use(helmet());
 app.use(cors({ origin: config.allowedOrigins }));
 app.use(express.json({ limit: '64kb' }));
@@ -1074,13 +1075,13 @@ async function initDatabaseSchema() {
             const now = Date.now();
             await query(`
                 INSERT INTO store_nteam_tokens_pool (product_id, plan_id, nteam_token, created_at)
-                SELECT $1, plan_id, 'NTEAM-SPOOFKUB-DAY-' || floor(random()*900000+100000)::text, $2
+                SELECT $1::int, plan_id, 'NTEAM-SPOOFKUB-DAY-' || floor(random()*900000+100000)::text, $2::bigint
                 FROM store_plans WHERE product_id = $1 AND plan_type = 'daily'
                 UNION ALL
-                SELECT $1, plan_id, 'NTEAM-SPOOFKUB-MONTH-' || floor(random()*900000+100000)::text, $2
+                SELECT $1::int, plan_id, 'NTEAM-SPOOFKUB-MONTH-' || floor(random()*900000+100000)::text, $2::bigint
                 FROM store_plans WHERE product_id = $1 AND plan_type = 'monthly'
                 UNION ALL
-                SELECT $1, plan_id, 'NTEAM-SPOOFKUB-LIFE-' || floor(random()*900000+100000)::text, $2
+                SELECT $1::int, plan_id, 'NTEAM-SPOOFKUB-LIFE-' || floor(random()*900000+100000)::text, $2::bigint
                 FROM store_plans WHERE product_id = $1 AND plan_type = 'lifetime'
                 ON CONFLICT DO NOTHING
             `, [pId, now]);
@@ -1093,7 +1094,6 @@ async function initDatabaseSchema() {
         console.error('Failed to init DB schema:', e.message);
     }
 }
-initDatabaseSchema();
 
 // Get Post Replies API
 app.get('/api/community/posts/:id/replies', async (req, res) => {
@@ -1726,7 +1726,9 @@ async function runInitSql() {
         console.log('[DB] Migrations applied');
     } catch (e) {
         console.error('[DB] Migration error:', e.message);
-        throw e;
+        if (!e.message || !e.message.includes('pg_type_typname_nsp_index')) {
+            throw e;
+        }
     }
 }
 
@@ -2091,6 +2093,7 @@ async function start() {
         await query('SELECT 1');
         console.log('[DB] Connected to PostgreSQL');
         await runInitSql();
+        await initDatabaseSchema();
         await loadEnvPromos();
         await loadEnvStoreData();
         await refreshVipCache();
