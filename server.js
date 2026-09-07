@@ -180,12 +180,19 @@ async function listVipNames() {
     return rows.map(r => r.name);
 }
 
+function getActiveOnlineCount() {
+    if (typeof io !== 'undefined' && io && io.sockets && io.sockets.sockets) {
+        return io.sockets.sockets.size;
+    }
+    return onlineCount || 0;
+}
+
 async function getStats() {
     const downloads = await query('SELECT COUNT(*)::int AS mods, COALESCE(SUM(count), 0)::bigint AS total FROM mod_downloads');
     const chats = await query('SELECT COUNT(*)::int AS total FROM chat_messages');
     const vips = await query('SELECT COUNT(*)::int AS total FROM vip_users');
     return {
-        online: onlineCount,
+        online: getActiveOnlineCount(),
         modsTracked: downloads.rows[0].mods,
         totalDownloads: parseInt(downloads.rows[0].total, 10),
         totalMessages: chats.rows[0].total,
@@ -255,6 +262,13 @@ app.get('/stats', async (req, res, next) => {
         const s = await getStats();
         res.json(s);
     } catch (e) { next(e); }
+});
+
+app.get('/api/stats/online', (req, res) => {
+    res.json({
+        success: true,
+        online: getActiveOnlineCount()
+    });
 });
 
 app.get('/downloads', async (req, res, next) => {
@@ -1590,8 +1604,13 @@ async function refreshVipCache() {
 
 io.on('connection', (socket) => {
     onlineCount++;
-    console.log(`User connected. Online: ${onlineCount}`);
-    io.emit('onlineCount', onlineCount);
+    const currentOnline = getActiveOnlineCount();
+    console.log(`User connected. Online: ${currentOnline}`);
+    io.emit('onlineCount', currentOnline);
+
+    socket.on('getOnlineCount', () => {
+        socket.emit('onlineCount', getActiveOnlineCount());
+    });
 
     // Send recent chat history to newly connected client
     getChatHistory(config.maxChatHistory).then(history => {
@@ -1687,11 +1706,14 @@ io.on('connection', (socket) => {
 
     socket.on('disconnect', () => {
         onlineCount = Math.max(0, onlineCount - 1);
-        console.log(`User disconnected. Online: ${onlineCount}`);
         rateLimitMap.delete(socket.id);
         const releasedName = releaseNickname(socket.id);
         if (releasedName) console.log(`Released nickname: ${releasedName}`);
-        io.emit('onlineCount', onlineCount);
+        setImmediate(() => {
+            const currentOnline = getActiveOnlineCount();
+            console.log(`User disconnected. Online: ${currentOnline}`);
+            io.emit('onlineCount', currentOnline);
+        });
     });
 });
 
