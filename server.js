@@ -580,11 +580,12 @@ app.get('/api/discord/community/messages', async (req, res) => {
                 viaLauncher = true;
             }
 
+            const INTELLIGENCE_AVATAR_URL = 'https://cdn.discordapp.com/avatars/1546384221222871121/3d8850dd4bfd42342e43528ca7626235.png';
             let avatar = 'https://cdn.discordapp.com/embed/avatars/0.png';
             if (msg.author?.avatar) {
                 avatar = `https://cdn.discordapp.com/avatars/${msg.author.id}/${msg.author.avatar}.png`;
             } else if (viaLauncher) {
-                avatar = 'https://avatars.githubusercontent.com/u/155028748?v=4';
+                avatar = INTELLIGENCE_AVATAR_URL;
             }
 
             return {
@@ -626,6 +627,7 @@ app.get('/api/discord/community/messages', async (req, res) => {
 
 // Send Community Chat Message
 app.post('/api/discord/community/messages', async (req, res) => {
+    const INTELLIGENCE_AVATAR_URL = 'https://cdn.discordapp.com/avatars/1546384221222871121/3d8850dd4bfd42342e43528ca7626235.png';
     const { senderName, content, avatarUrl } = req.body;
     const { communityChannelId, communityWebhookUrl, botToken } = config.discord;
 
@@ -635,7 +637,7 @@ app.post('/api/discord/community/messages', async (req, res) => {
     }
 
     const cleanSender = (senderName || 'ผู้เล่นทั่วไป').trim().replace(/[*_~`]/g, '').slice(0, 32);
-    const cleanAvatar = avatarUrl || 'https://avatars.githubusercontent.com/u/155028748?v=4';
+    const cleanAvatar = (avatarUrl && avatarUrl.startsWith('http')) ? avatarUrl : INTELLIGENCE_AVATAR_URL;
 
     if (communityWebhookUrl) {
         try {
